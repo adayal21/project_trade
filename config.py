@@ -1,0 +1,15 @@
+
+INITIAL_CAPITAL = 10000
+
+COINS = [
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "BNB-USD"
+]
+
+TIMEFRAME = "1h"
+
+RISK_PER_TRADE = 0.25
+
+DATA_DIR = "data"
