@@ -1,6 +1,6 @@
 
 pandas
 numpy
-yfinance
+requests 
 ta
-schedule
+

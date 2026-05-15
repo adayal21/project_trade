@@ -137,7 +137,7 @@ def generate_signal(
     Parameters
     ----------
     adx_threshold       : minimum ADX to consider the market trending (default 25)
-    atr_expansion_ratio : ATR must be at least this fraction of its SMA (default 0.8)
+    atr_expansion_ratio : ATR must be at least this fraction of its SMA (default 0.6)
     """
     if not _is_ready(df):
         return None
