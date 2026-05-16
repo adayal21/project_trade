@@ -5,7 +5,10 @@ COINS = [
     "BTC-USD",
     "ETH-USD",
     "XRP-USD",
-    "BNB-USD"
+    "BNB-USD",
+    "DOGE-USD",
+    "LINK-USD",
+    "LTC-USD"
 ]
 
 # ---------------------------------------------------------------------------
