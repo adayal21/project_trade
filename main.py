@@ -3,7 +3,13 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta, timezone
 
-from config import COINS, DATA_DIR, INITIAL_CAPITAL, RISK_PER_TRADE, STOP_LOSS_PCT, MAX_ALLOCATION, MAX_POSITIONS_PER_DIR
+from config import (
+    COINS, DATA_DIR, INITIAL_CAPITAL, RISK_PER_TRADE, STOP_LOSS_PCT,
+    MAX_ALLOCATION, MAX_POSITIONS_PER_DIR,
+    PARTIAL_TAKE_PROFIT_PCT, PARTIAL_EXIT_RATIO,
+    TRAILING_STOP_PCT,
+    MAX_HOLD_BARS, TIME_EXIT_MIN_MOVE_PCT,
+)
 from strategy import apply_indicators, generate_signal
 from portfolio import initialize_portfolio, log_portfolio
 
@@ -208,7 +214,8 @@ for symbol in COINS:
     position     = load_position(symbol)
 
     # -------------------------------------------------------------------
-    # Stop-loss — always checked, no gate bypasses this
+    # Stop-loss — always checked first, no gate bypasses this
+    # Applies to the full remaining quantity (whether or not Tier 1 fired)
     # -------------------------------------------------------------------
     if position is not None:
         side        = position['Side']
@@ -244,7 +251,126 @@ for symbol in COINS:
             position = None
 
     # -------------------------------------------------------------------
-    # Counter-signal exit
+    # Tier 1 — Partial profit-taking at +PARTIAL_TAKE_PROFIT_PCT
+    # Closes PARTIAL_EXIT_RATIO of the position, banks that cash,
+    # and marks the position as partially exited so Tier 2 can activate.
+    # -------------------------------------------------------------------
+    if position is not None:
+        side             = position['Side']
+        entry_price      = float(position['Entry Price'])
+        quantity         = float(position['Quantity'])
+        already_partial  = bool(int(position.get('Partial_Taken', 0)))
+
+        move_pct = (
+            (latest_price - entry_price) / entry_price if side == "LONG"
+            else (entry_price - latest_price) / entry_price
+        )
+
+        if not already_partial and move_pct >= PARTIAL_TAKE_PROFIT_PCT:
+            exit_qty      = quantity * PARTIAL_EXIT_RATIO
+            remain_qty    = quantity - exit_qty
+            partial_pnl   = move_pct * entry_price * exit_qty
+
+            realized_pnl    += partial_pnl
+            total_trades    += 1
+            trades_this_run += 1
+            cash            += entry_price * exit_qty + partial_pnl
+
+            print(f"  💰 TIER 1 partial exit ({move_pct:.2%} gain) | "
+                  f"Closed {PARTIAL_EXIT_RATIO:.0%} @ {latest_price:.4f} | "
+                  f"PnL: +{partial_pnl:.2f} | Remaining qty: {remain_qty:.6f}")
+
+            log_trade(symbol, {
+                "Coin":        symbol,
+                "Side":        side,
+                "Entry Price": entry_price,
+                "Exit Price":  latest_price,
+                "Quantity":    exit_qty,
+                "PnL":         round(partial_pnl, 4),
+                "Exit Reason": "PARTIAL_PROFIT",
+                "Exit Time":   datetime.now(timezone.utc)
+            })
+
+            # Update the position: smaller quantity, Tier 1 done,
+            # seed the trailing high-water mark at current price
+            save_position(symbol, {
+                "Coin":          symbol,
+                "Side":          side,
+                "Entry Price":   entry_price,
+                "Quantity":      remain_qty,
+                "Timestamp":     position['Timestamp'],
+                "Partial_Taken": 1,
+                "Trail_HWM":     latest_price,   # Tier 2 starts tracking from here
+                "Bars_Held":     int(position.get('Bars_Held', 0)),
+            })
+            position = load_position(symbol)   # reload updated state
+
+    # -------------------------------------------------------------------
+    # Tier 2 — Trailing stop on the remaining position
+    # Only active after Tier 1 has fired (Partial_Taken == 1).
+    # Updates the high-water mark each bar and exits if price drops
+    # TRAILING_STOP_PCT below the peak.
+    # -------------------------------------------------------------------
+    if position is not None:
+        side            = position['Side']
+        entry_price     = float(position['Entry Price'])
+        quantity        = float(position['Quantity'])
+        already_partial = bool(int(position.get('Partial_Taken', 0)))
+
+        if already_partial:
+            # Update high-water mark
+            hwm = float(position.get('Trail_HWM', entry_price))
+            if side == "LONG":
+                hwm = max(hwm, latest_price)
+                trail_breach = latest_price < hwm * (1 - TRAILING_STOP_PCT)
+            else:
+                hwm = min(hwm, latest_price)
+                trail_breach = latest_price > hwm * (1 + TRAILING_STOP_PCT)
+
+            # Persist updated HWM each bar
+            save_position(symbol, {
+                "Coin":          symbol,
+                "Side":          side,
+                "Entry Price":   entry_price,
+                "Quantity":      quantity,
+                "Timestamp":     position['Timestamp'],
+                "Partial_Taken": 1,
+                "Trail_HWM":     hwm,
+                "Bars_Held":     int(position.get('Bars_Held', 0)),
+            })
+            position = load_position(symbol)
+
+            if trail_breach:
+                move_pct = (
+                    (latest_price - entry_price) / entry_price if side == "LONG"
+                    else (entry_price - latest_price) / entry_price
+                )
+                pnl = move_pct * entry_price * quantity
+
+                realized_pnl    += pnl
+                total_trades    += 1
+                trades_this_run += 1
+                cash            += entry_price * quantity + pnl
+
+                print(f"  🔔 TIER 2 trailing stop hit | HWM={hwm:.4f} | "
+                      f"Price={latest_price:.4f} | PnL: {pnl:.2f}")
+
+                log_trade(symbol, {
+                    "Coin":        symbol,
+                    "Side":        side,
+                    "Entry Price": entry_price,
+                    "Exit Price":  latest_price,
+                    "Quantity":    quantity,
+                    "PnL":         round(pnl, 4),
+                    "Exit Reason": "TRAILING_STOP",
+                    "Exit Time":   datetime.now(timezone.utc)
+                })
+
+                clear_position(symbol)
+                position = None
+
+    # -------------------------------------------------------------------
+    # Counter-signal exit (existing logic, unchanged)
     # -------------------------------------------------------------------
     if position is not None and signal_dir is not None:
         side        = position['Side']
@@ -282,7 +408,61 @@ for symbol in COINS:
             position = None
 
     # -------------------------------------------------------------------
-    # Entry — three sequential gates
+    # Tier 4 — Time-based exit backstop
+    # If the position has been open >= MAX_HOLD_BARS bars AND the price
+    # has barely moved (|move| < TIME_EXIT_MIN_MOVE_PCT), free the capital.
+    # Bars_Held is incremented every run; saved alongside position state.
+    # -------------------------------------------------------------------
+    if position is not None:
+        side        = position['Side']
+        entry_price = float(position['Entry Price'])
+        quantity    = float(position['Quantity'])
+        bars_held   = int(position.get('Bars_Held', 0)) + 1  # increment this run
+
+        move_pct = (
+            (latest_price - entry_price) / entry_price if side == "LONG"
+            else (entry_price - latest_price) / entry_price
+        )
+
+        if bars_held >= MAX_HOLD_BARS and abs(move_pct) < TIME_EXIT_MIN_MOVE_PCT:
+            pnl = move_pct * entry_price * quantity
+
+            realized_pnl    += pnl
+            total_trades    += 1
+            trades_this_run += 1
+            cash            += entry_price * quantity + pnl
+
+            print(f"  ⏱️  TIER 4 time exit ({bars_held} bars, move={move_pct:.2%}) | "
+                  f"PnL: {pnl:.2f}")
+
+            log_trade(symbol, {
+                "Coin":        symbol,
+                "Side":        side,
+                "Entry Price": entry_price,
+                "Exit Price":  latest_price,
+                "Quantity":    quantity,
+                "PnL":         round(pnl, 4),
+                "Exit Reason": "TIME_EXIT",
+                "Exit Time":   datetime.now(timezone.utc)
+            })
+
+            clear_position(symbol)
+            position = None
+        else:
+            # Not exiting yet — persist updated bars_held counter
+            save_position(symbol, {
+                "Coin":          symbol,
+                "Side":          side,
+                "Entry Price":   entry_price,
+                "Quantity":      quantity,
+                "Timestamp":     position['Timestamp'],
+                "Partial_Taken": int(position.get('Partial_Taken', 0)),
+                "Trail_HWM":     float(position.get('Trail_HWM', entry_price)),
+                "Bars_Held":     bars_held,
+            })
+
+    # -------------------------------------------------------------------
+    # Entry — three sequential gates (Tier 3: MAX_POSITIONS_PER_DIR = 2)
     # -------------------------------------------------------------------
     if position is None and signal_dir is not None:
 
@@ -300,7 +480,7 @@ for symbol in COINS:
                 print()
                 continue
 
-        # Gate 3: Correlation guard
+        # Gate 3: Correlation guard (Tier 3 — now allows up to MAX_POSITIONS_PER_DIR=2)
         dir_counts = count_open_by_direction()
         if dir_counts[signal_dir] >= MAX_POSITIONS_PER_DIR:
             print(f"  🚫 Correlation guard — already {dir_counts[signal_dir]} "
@@ -322,11 +502,14 @@ for symbol in COINS:
         quantity = allocation / latest_price
 
         save_position(symbol, {
-            "Coin":        symbol,
-            "Side":        signal_dir,
-            "Entry Price": latest_price,
-            "Quantity":    quantity,
-            "Timestamp":   datetime.now(timezone.utc)
+            "Coin":          symbol,
+            "Side":          signal_dir,
+            "Entry Price":   latest_price,
+            "Quantity":      quantity,
+            "Timestamp":     datetime.now(timezone.utc),
+            "Partial_Taken": 0,           # Tier 1 not yet fired
+            "Trail_HWM":     latest_price, # Tier 2 high-water mark seed
+            "Bars_Held":     0,            # Tier 4 counter
         })
 
         cash -= allocation

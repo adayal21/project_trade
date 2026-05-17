@@ -1,2 +1,2 @@
-scp -i ~/.ssh/google_compute_engine -r g12amandayal12@34.27.227.220:/home/g12amandayal12/Projects/project_trade/data/ ./data_gcp/
-scp -i ~/.ssh/google_compute_engine -r g12amandayal12@34.27.227.220:/home/g12amandayal12/Projects/project_trade/logs/ ./logs_gcp/
+scp -i ~/.ssh/google_compute_engine -r g12amandayal12@34.27.227.220:/home/g12amandayal12/Projects/project_trade/data/* ./data_gcp/
+scp -i ~/.ssh/google_compute_engine -r g12amandayal12@34.27.227.220:/home/g12amandayal12/Projects/project_trade/logs/* ./logs_gcp/
