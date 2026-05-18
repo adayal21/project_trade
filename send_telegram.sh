@@ -5,7 +5,7 @@ CHAT_ID="5920496287"                                 # your chat ID
 LOG_FILE="logs/live.log"                            # adjust path if needed
 
 # Grab last 100 lines of the log — that's where the latest run summary is
-LAST_RUN=$(tail -n 100 "$LOG_FILE")
+LAST_RUN=$(tail -n 150 "$LOG_FILE")
 
 # Extract Portfolio Snapshot block
 PORTFOLIO=$(echo "$LAST_RUN" | grep -A 10 "Portfolio Snapshot" | tail -n 9)
