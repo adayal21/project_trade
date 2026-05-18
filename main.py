@@ -579,7 +579,7 @@ for symbol in COINS:
         # Capital guard
         allocation = cash * RISK_PER_TRADE
         if allocation > cash * MAX_ALLOCATION:
-            print(f"  🚫 Capital guard — ${allocation:.2f} exceeds safe limit.")
+            print(f"  🚫 Capital guard — ₹{allocation:.2f} exceeds safe limit.")
             print()
             continue
         if allocation <= 0:
@@ -603,7 +603,7 @@ for symbol in COINS:
         cash -= allocation
 
         print(f"  ✅ Entered {signal_dir} @ {latest_price:.4f}")
-        print(f"     Alloc=${allocation:.2f} | Qty={quantity:.6f}")
+        print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f}")
         print(f"     ADX={signal_data['adx']:.1f} | RSI={signal_data['rsi']:.1f} | "
               f"Confirmations={signal_data['soft_confirmations']}/2 | "
               f"BTC_Regime={btc_regime}")
@@ -653,11 +653,11 @@ print("=" * 50)
 
 allocated_capital = INITIAL_CAPITAL - cash
 
-print(f"Allocated    : ${allocated_capital:.2f}")
-print(f"Cash         : ${cash:.2f}")
-print(f"Unrealized   : ${unrealized:.2f}")
-print(f"Equity       : ${equity:.2f}")
-print(f"Realized PnL : ${realized_pnl:.2f}")
+print(f"Allocated    : ₹{allocated_capital:.2f}")
+print(f"Cash         : ₹{cash:.2f}")
+print(f"Unrealized   : ₹{unrealized:.2f}")
+print(f"Equity       : ₹{equity:.2f}")
+print(f"Realized PnL : ₹{realized_pnl:.2f}")
 print(f"BTC Regime   : {btc_regime or 'NEUTRAL'}")
 print(
     f"Open         : {open_positions} | "
