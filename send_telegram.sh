@@ -1,37 +1,28 @@
 #!/bin/bash
 
-# Configuration
-BOT_TOKEN="8578606440:AAGrUqdSqNL97jYsoTfd1t72nXGOmXf6hEE"  # Replace with your token
-CHAT_ID="5920496287"                                # Replace with your user ID
-LOG_FILE="data/live.log"
-DATA_DIR="data"
+BOT_TOKEN="8578606440:AAGrUqdSqNL97jYsoTfd1t72nXGOmXf6hEE"  # your token
+CHAT_ID="5920496287"                                 # your chat ID
+LOG_FILE="logs/live.log"                            # adjust path if needed
 
-# Extract the Open Positions section from live.log
-if [ ! -f "$LOG_FILE" ]; then
-    echo "Log file not found"
-    exit 1
-fi
+# Grab last 100 lines of the log — that's where the latest run summary is
+LAST_RUN=$(tail -n 100 "$LOG_FILE")
 
-# Extract everything after "Open Positions" section
-SUMMARY=$(tail -n 200 "$LOG_FILE" | awk '/^Open Positions/,EOF' | head -n 100)
+# Extract Portfolio Snapshot block
+PORTFOLIO=$(echo "$LAST_RUN" | grep -A 10 "Portfolio Snapshot" | tail -n 9)
 
-# Also grab the Portfolio Snapshot
-PORTFOLIO=$(tail -n 200 "$LOG_FILE" | awk '/^Portfolio Snapshot/,/^Done\./' | head -n 20)
+# Extract Open Positions block
+POSITIONS=$(echo "$LAST_RUN" | grep -A 80 "Open Positions" | grep -v "^=")
 
-# Combine into a single message
-MESSAGE="*Trading Bot Update*
+# Build message
+MESSAGE="📊 Trading Bot Update
 
 $PORTFOLIO
 
-$SUMMARY"
+$POSITIONS"
 
-# Send to Telegram
+# Send
 curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"chat_id\": \"$CHAT_ID\",
-    \"text\": \"$MESSAGE\",
-    \"parse_mode\": \"Markdown\"
-  }" > /dev/null
+  -d "chat_id=$CHAT_ID" \
+  --data-urlencode "text=$MESSAGE" > /dev/null
 
-echo "Telegram notification sent at $(date)"
+echo "Sent at $(date)"
