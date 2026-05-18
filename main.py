@@ -150,8 +150,8 @@ def fetch_data(symbol: str) -> pd.DataFrame:
         timeout=10
     )
 
-    print(f"  URL: {url}")
-    print(f"  HTTP Status: {response.status_code}")
+    # print(f"  URL: {url}")
+    # print(f"  HTTP Status: {response.status_code}")
 
     try:
         data = response.json()
