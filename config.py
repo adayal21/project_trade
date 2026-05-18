@@ -43,3 +43,9 @@ MAX_HOLD_BARS            = 6      # if a position has been open >= 6 bars with n
                                   # meaningful move, close it and free up capital
 TIME_EXIT_MIN_MOVE_PCT   = 0.005  # "meaningful move" threshold: if |move| < 0.5%
                                   # after MAX_HOLD_BARS, trigger the time exit
+
+MAX_HOLD_BARS_EXTENDED   = 12     # if a position is up but stuck below the +2% partial
+                                  # take-profit target after this many bars, exit with
+                                  # whatever small gain exists rather than waiting forever
+MAX_HOLD_BARS_TRAIL      = 10     # after Tier 1 partial exit fires, close the remaining
+                                  # half if it hasn't trailed out within this many bars

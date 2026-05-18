@@ -9,6 +9,7 @@ from config import (
     PARTIAL_TAKE_PROFIT_PCT, PARTIAL_EXIT_RATIO,
     TRAILING_STOP_PCT,
     MAX_HOLD_BARS, TIME_EXIT_MIN_MOVE_PCT,
+    MAX_HOLD_BARS_EXTENDED, MAX_HOLD_BARS_TRAIL,
 )
 from strategy import apply_indicators, generate_signal
 from portfolio import initialize_portfolio, log_portfolio
@@ -30,7 +31,16 @@ def get_trade_file(symbol: str) -> str:
 def load_position(symbol: str) -> dict | None:
     file = get_position_file(symbol)
     if os.path.exists(file):
-        return pd.read_csv(file).iloc[0].to_dict()
+        df = pd.read_csv(file)
+        if df.empty:
+            os.remove(file)
+            return None
+        pos = df.iloc[0].to_dict()
+        # Stale file guard: if Quantity is missing or zero the position is already closed
+        if float(pos.get('Quantity', 0)) <= 0:
+            os.remove(file)
+            return None
+        return pos
     return None
 
 
@@ -408,23 +418,53 @@ for symbol in COINS:
             position = None
 
     # -------------------------------------------------------------------
-    # Tier 4 — Time-based exit backstop
-    # If the position has been open >= MAX_HOLD_BARS bars AND the price
-    # has barely moved (|move| < TIME_EXIT_MIN_MOVE_PCT), free the capital.
-    # Bars_Held is incremented every run; saved alongside position state.
+    # Tier 4 — Time-based exit backstop (three sub-cases)
+    #
+    #   4A  Stagnant          : bars >= MAX_HOLD_BARS  AND |move| < 0.5%
+    #                           → price has gone nowhere; cut and free capital
+    #
+    #   4B  Stuck-profitable  : bars >= MAX_HOLD_BARS_EXTENDED AND 0 < move < +2%
+    #                           (Tier 1 never fired) → take the small gain rather
+    #                           than waiting forever for a target that may never come
+    #
+    #   4C  Trailing timeout  : Tier 1 already fired AND bars >= MAX_HOLD_BARS_TRAIL
+    #                           → remaining half has drifted long enough; exit it
+    #
+    # Bars_Held is incremented every run and persisted in the position file.
     # -------------------------------------------------------------------
     if position is not None:
-        side        = position['Side']
-        entry_price = float(position['Entry Price'])
-        quantity    = float(position['Quantity'])
-        bars_held   = int(position.get('Bars_Held', 0)) + 1  # increment this run
+        side            = position['Side']
+        entry_price     = float(position['Entry Price'])
+        quantity        = float(position['Quantity'])
+        already_partial = bool(int(position.get('Partial_Taken', 0)))
+        bars_held       = int(position.get('Bars_Held', 0)) + 1  # increment this run
 
         move_pct = (
             (latest_price - entry_price) / entry_price if side == "LONG"
             else (entry_price - latest_price) / entry_price
         )
 
-        if bars_held >= MAX_HOLD_BARS and abs(move_pct) < TIME_EXIT_MIN_MOVE_PCT:
+        tier4_exit    = False
+        tier4_reason  = ""
+
+        # 4A — truly stagnant
+        if not tier4_exit and bars_held >= MAX_HOLD_BARS and abs(move_pct) < TIME_EXIT_MIN_MOVE_PCT:
+            tier4_exit   = True
+            tier4_reason = f"TIME_EXIT_STAGNANT ({bars_held} bars, move={move_pct:.2%})"
+
+        # 4B — stuck below partial-profit target (Tier 1 never triggered)
+        if not tier4_exit and not already_partial \
+                and bars_held >= MAX_HOLD_BARS_EXTENDED \
+                and 0 < move_pct < PARTIAL_TAKE_PROFIT_PCT:
+            tier4_exit   = True
+            tier4_reason = f"TIME_EXIT_STUCK_PROFIT ({bars_held} bars, move={move_pct:.2%})"
+
+        # 4C — trailing half timeout (Tier 1 already fired)
+        if not tier4_exit and already_partial and bars_held >= MAX_HOLD_BARS_TRAIL:
+            tier4_exit   = True
+            tier4_reason = f"TIME_EXIT_TRAIL_TIMEOUT ({bars_held} bars)"
+
+        if tier4_exit:
             pnl = move_pct * entry_price * quantity
 
             realized_pnl    += pnl
@@ -432,8 +472,7 @@ for symbol in COINS:
             trades_this_run += 1
             cash            += entry_price * quantity + pnl
 
-            print(f"  ⏱️  TIER 4 time exit ({bars_held} bars, move={move_pct:.2%}) | "
-                  f"PnL: {pnl:.2f}")
+            print(f"  ⏱️  TIER 4 exit | {tier4_reason} | PnL: {pnl:.2f}")
 
             log_trade(symbol, {
                 "Coin":        symbol,
@@ -442,7 +481,7 @@ for symbol in COINS:
                 "Exit Price":  latest_price,
                 "Quantity":    quantity,
                 "PnL":         round(pnl, 4),
-                "Exit Reason": "TIME_EXIT",
+                "Exit Reason": tier4_reason.split(" (")[0],   # clean label for CSV
                 "Exit Time":   datetime.now(timezone.utc)
             })
 
@@ -568,5 +607,84 @@ print(f"Equity       : ${equity:.2f}")
 print(f"Realized PnL : ${realized_pnl:.2f}")
 print(f"BTC Regime   : {btc_regime or 'NEUTRAL'}")
 print(f"Open         : {open_positions} | Trades this run: {trades_this_run}")
+print("=" * 50)
+
+# ---------------------------------------------------------------------------
+# Open Positions Summary
+# ---------------------------------------------------------------------------
+
+print()
+print("=" * 50)
+print("Open Positions")
+print("=" * 50)
+
+any_open = False
+for symbol in COINS:
+    position = load_position(symbol)
+    if position is None:
+        continue
+
+    any_open        = True
+    side            = position['Side']
+    entry_price     = float(position['Entry Price'])
+    quantity        = float(position['Quantity'])
+    bars_held       = int(position.get('Bars_Held', 0))
+    already_partial = bool(int(position.get('Partial_Taken', 0)))
+    hwm             = float(position.get('Trail_HWM', entry_price))
+
+    if symbol in coins_data:
+        current_price = float(coins_data[symbol]['Close'].iloc[-1])
+    else:
+        fetched       = fetch_data(symbol)
+        current_price = float(fetched['Close'].iloc[-1]) if len(fetched) > 0 \
+                        else entry_price
+
+    # Direction-aware profit %
+    if side == "LONG":
+        move_pct     = (current_price - entry_price) / entry_price
+        peak_pct     = (hwm - entry_price) / entry_price
+        reversal_pct = (hwm - current_price) / hwm if already_partial else None
+    else:
+        move_pct     = (entry_price - current_price) / entry_price
+        peak_pct     = (entry_price - hwm) / entry_price
+        reversal_pct = (current_price - hwm) / hwm if already_partial else None
+
+    pnl = move_pct * entry_price * quantity
+
+    # Status + reason
+    if already_partial:
+        gap_to_trail = abs(reversal_pct) if reversal_pct is not None else 0
+        status       = "HOLDING"
+        reason       = f"Reversal < {TRAILING_STOP_PCT:.1%}"
+        trail_label  = f"{abs(reversal_pct):.1%} from peak" if reversal_pct is not None else "—"
+    else:
+        gap_to_tp    = PARTIAL_TAKE_PROFIT_PCT - move_pct
+        status       = "HOLDING"
+        reason       = f"TP not reached (+{gap_to_tp:.1%} to go)" if move_pct < PARTIAL_TAKE_PROFIT_PCT \
+                       else "TP pending"
+        trail_label  = "NOT ACTIVE"
+
+    profit_sign = "+" if move_pct >= 0 else ""
+    peak_sign   = "+" if peak_pct >= 0 else ""
+    pnl_sign    = "+" if pnl >= 0 else ""
+
+    print(f"{symbol} | {side}")
+    print("-" * 50)
+    print(f"Entry Price        : {entry_price:.2f}")
+    print(f"Current Price      : {current_price:.2f}")
+    print(f"Current Profit     : {profit_sign}{move_pct:.1%}")
+    print(f"Peak Profit        : {peak_sign}{peak_pct:.1%}")
+    if already_partial and reversal_pct is not None:
+        print(f"Reversal           : {abs(reversal_pct):.1%}")
+    print(f"Trailing Exit      : {trail_label}")
+    print(f"Partial TP         : {'YES' if already_partial else 'NO'}")
+    print(f"Bars Held          : {bars_held}")
+    print(f"Status             : {status}")
+    print(f"Reason             : {reason}")
+    print(f"PnL                : {pnl_sign}{pnl:.2f}")
+
+if not any_open:
+    print("No open positions.")
+
 print("=" * 50)
 print("Done.")
