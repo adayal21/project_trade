@@ -338,20 +338,36 @@ for symbol in COINS:
     # ------------------------------------------------------------------
     _row = df.iloc[-1]
     _atr_ratio = (_row["ATR"] / _row["ATR_SMA"]) if _row["ATR_SMA"] > 0 else 0
+    _adx_ok    = _row["ADX"] >= 18.0
+    _atr_ok    = _atr_ratio >= 0.50
     print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}  "
           f"Close>EMA200={latest_price > _row['EMA200']}")
     print(f"  [DIAG] RSI={_row['RSI']:.2f}  ADX={_row['ADX']:.2f}(thr=18)  "
           f"Supertrend={'BULL' if _row['Supertrend'] else 'BEAR'}")
     print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
           f"Ratio={_atr_ratio:.2f}(thr=0.50)  "
-          f"ATR_OK={_atr_ratio >= 0.50}")
+          f"ATR_OK={_atr_ok}")
     print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_SMA={_row['Volume_SMA']:.2f}  "
           f"Vol_OK={_row['Volume'] > _row['Volume_SMA']}")
     print(f"  [DIAG] Signal={signal_dir or 'NONE'}")
-    if signal_data is None and _row["ADX"] < 18.0:
-        print(f"  [DIAG] Blocked by: ADX too low ({_row['ADX']:.2f} < 18.0)")
-    if signal_data is None and _atr_ratio < 0.50:
-        print(f"  [DIAG] Blocked by: ATR compression ({_atr_ratio:.2f} < 0.50)")
+    # Explain exactly why signal is None
+    if signal_data is None:
+        if not _adx_ok:
+            print(f"  [DIAG] ✗ Blocked: ADX too low ({_row['ADX']:.2f} < 18.0)")
+        elif not _atr_ok:
+            print(f"  [DIAG] ✗ Blocked: ATR compression ({_atr_ratio:.2f} < 0.50)")
+        else:
+            # Hard filters passed — directional conditions failed
+            _ema_long  = latest_price > _row["EMA200"]
+            _st_bull   = bool(_row["Supertrend"])
+            _rsi_long  = _row["RSI"] > 50
+            _vol_ok    = _row["Volume"] > _row["Volume_SMA"]
+            _ema_short = latest_price < _row["EMA200"]
+            _st_bear   = not bool(_row["Supertrend"])
+            _rsi_short = _row["RSI"] < 50
+            print(f"  [DIAG] ✗ Hard filters PASSED but no directional setup:")
+            print(f"  [DIAG]   LONG  needs: EMA200✓={_ema_long} ST_bull={_st_bull} + (RSI>50={_rsi_long} OR Vol={_vol_ok})")
+            print(f"  [DIAG]   SHORT needs: EMA200✓={_ema_short} ST_bear={_st_bear} + (RSI<50={_rsi_short} OR Vol={_vol_ok})")
 
     # -------------------------------------------------------------------
     # Stop-loss — always checked first, no gate bypasses this
