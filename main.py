@@ -84,29 +84,58 @@ def count_open_by_direction() -> dict:
 
 def get_btc_regime(coins_data: dict) -> str | None:
     """
-    Returns the macro market direction based on BTC's EMA200 + Supertrend.
+    Returns the macro market direction based on BTC's indicators.
 
-    'LONG'  → BTC above EMA200 and Supertrend bullish
-    'SHORT' → BTC below EMA200 and Supertrend bearish
-    None    → indicators are mixed; regime is unclear
+    Migrated from Coinbase → CoinSwitch: INR-denominated BTC candles are ~2x
+    noisier, which causes EMA200 and Supertrend to disagree constantly on a
+    single bar, producing permanent NEUTRAL under the old binary AND gate.
 
-    Uses already-fetched BTC data to avoid a redundant API call.
+    New approach — 3-indicator majority vote (need 2-of-3 to agree):
+      1. EMA200     : Close vs EMA200
+      2. Supertrend : bullish / bearish flag
+      3. EMA50/20   : fast EMA above slow EMA (short-term momentum)
+
+    Additionally, Supertrend is confirmed over a 2-bar window to debounce
+    single-candle flips caused by CoinSwitch tick noise.
+
+    'LONG'  → 2 or more indicators bullish
+    'SHORT' → 2 or more indicators bearish
+    None    → split opinion; regime unclear
     """
-    btc_df = coins_data.get("BTC-USD")
-    if btc_df is None or len(btc_df) == 0:
+    btc_df = coins_data.get("BTC/INR")
+    if btc_df is None or len(btc_df) < 3:
         return None
 
     latest = btc_df.iloc[-1]
+    prev   = btc_df.iloc[-2]
 
-    if pd.isna(latest.get('EMA200')) or pd.isna(latest.get('Supertrend')):
+    required = ['EMA200', 'Supertrend']
+    if any(pd.isna(latest.get(col)) for col in required):
         return None
 
-    if latest['Close'] > latest['EMA200'] and latest['Supertrend']:
+    # --- Indicator 1: EMA200 ---
+    ema200_bull = latest['Close'] > latest['EMA200']
+    ema200_bear = latest['Close'] < latest['EMA200']
+
+    # --- Indicator 2: Supertrend (2-bar confirmation to debounce noise) ---
+    st_bull = bool(latest['Supertrend']) and bool(prev['Supertrend'])
+    st_bear = (not bool(latest['Supertrend'])) and (not bool(prev['Supertrend']))
+
+    # --- Indicator 3: EMA50 vs EMA20 short-term momentum ---
+    ema20  = btc_df['Close'].ewm(span=20,  adjust=False).mean().iloc[-1]
+    ema50  = btc_df['Close'].ewm(span=50,  adjust=False).mean().iloc[-1]
+    ema_fast_bull = ema20 > ema50
+    ema_fast_bear = ema20 < ema50
+
+    bull_score = int(ema200_bull) + int(st_bull) + int(ema_fast_bull)
+    bear_score = int(ema200_bear) + int(st_bear) + int(ema_fast_bear)
+
+    if bull_score >= 2:
         return "LONG"
-    if latest['Close'] < latest['EMA200'] and not latest['Supertrend']:
+    if bear_score >= 2:
         return "SHORT"
 
-    return None  # EMA and Supertrend disagree — no clear regime
+    return None  # indicators split — no clear regime
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +270,7 @@ coins_data = {}
 for symbol in COINS:
     print(f"\nFetching {symbol}")
     df = fetch_data(symbol)
-    if len(df) < 250:
+    if len(df) < 200:   # lowered from 250: CoinSwitch returns ~480 bars per 20-day window
         print(f"  Not enough data ({len(df)} bars), skipping.")
         continue
     coins_data[symbol] = apply_indicators(df)
@@ -253,7 +282,39 @@ for symbol in COINS:
 btc_regime = get_btc_regime(coins_data)
 print(f"\n{'=' * 50}")
 print(f"BTC Regime : {btc_regime or 'NEUTRAL (mixed — altcoin entries blocked)'}")
-print(f"{'=' * 50}\n")
+print(f"{'=' * 50}")
+
+# ------------------------------------------------------------------
+# [DIAG] BTC regime vote breakdown — temporary verbose diagnostics
+# Remove this block once CoinSwitch behaviour is validated.
+# ------------------------------------------------------------------
+btc_df = coins_data.get("BTC/INR")
+if btc_df is not None and len(btc_df) >= 3:
+    _latest = btc_df.iloc[-1]
+    _prev   = btc_df.iloc[-2]
+    _ema20  = btc_df["Close"].ewm(span=20, adjust=False).mean().iloc[-1]
+    _ema50  = btc_df["Close"].ewm(span=50, adjust=False).mean().iloc[-1]
+
+    _v1_bull = _latest["Close"] > _latest["EMA200"]
+    _v2_bull = bool(_latest["Supertrend"]) and bool(_prev["Supertrend"])
+    _v3_bull = _ema20 > _ema50
+
+    _v1_bear = _latest["Close"] < _latest["EMA200"]
+    _v2_bear = (not bool(_latest["Supertrend"])) and (not bool(_prev["Supertrend"]))
+    _v3_bear = _ema20 < _ema50
+
+    _bull_score = int(_v1_bull) + int(_v2_bull) + int(_v3_bull)
+    _bear_score = int(_v1_bear) + int(_v2_bear) + int(_v3_bear)
+
+    print(f"[DIAG] BTC/INR Regime Votes:")
+    print(f"  Close       : {_latest['Close']:.2f}")
+    print(f"  EMA200      : {_latest['EMA200']:.2f}  ->  Vote1 BULL={_v1_bull} BEAR={_v1_bear}")
+    print(f"  Supertrend  : now={bool(_latest['Supertrend'])} prev={bool(_prev['Supertrend'])}  ->  Vote2 BULL={_v2_bull} BEAR={_v2_bear}")
+    print(f"  EMA20/EMA50 : {_ema20:.2f} / {_ema50:.2f}  ->  Vote3 BULL={_v3_bull} BEAR={_v3_bear}")
+    print(f"  Bull Score  : {_bull_score}/3  |  Bear Score : {_bear_score}/3  ->  Regime={btc_regime or 'NEUTRAL'}")
+    print(f"  ADX         : {_latest['ADX']:.2f}  |  RSI={_latest['RSI']:.2f}  |  ATR={_latest['ATR']:.2f}  |  ATR_SMA={_latest['ATR_SMA']:.2f}")
+    print(f"  ST_Upper    : {_latest['Supertrend_Upper']:.2f}  |  ST_Lower={_latest['Supertrend_Lower']:.2f}")
+print()
 
 # ------------------------------------------------------------------
 # Step 3: Process each coin.
@@ -269,8 +330,28 @@ for symbol in COINS:
     df           = coins_data[symbol]
     signal_data  = generate_signal(df)
     signal_dir   = signal_data["signal"] if signal_data else None
-    latest_price = float(df['Close'].iloc[-1])
+    latest_price = float(df["Close"].iloc[-1])
     position     = load_position(symbol)
+
+    # ------------------------------------------------------------------
+    # [DIAG] Per-coin indicator snapshot — temporary verbose diagnostics
+    # ------------------------------------------------------------------
+    _row = df.iloc[-1]
+    _atr_ratio = (_row["ATR"] / _row["ATR_SMA"]) if _row["ATR_SMA"] > 0 else 0
+    print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}  "
+          f"Close>EMA200={latest_price > _row['EMA200']}")
+    print(f"  [DIAG] RSI={_row['RSI']:.2f}  ADX={_row['ADX']:.2f}(thr=18)  "
+          f"Supertrend={'BULL' if _row['Supertrend'] else 'BEAR'}")
+    print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
+          f"Ratio={_atr_ratio:.2f}(thr=0.50)  "
+          f"ATR_OK={_atr_ratio >= 0.50}")
+    print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_SMA={_row['Volume_SMA']:.2f}  "
+          f"Vol_OK={_row['Volume'] > _row['Volume_SMA']}")
+    print(f"  [DIAG] Signal={signal_dir or 'NONE'}")
+    if signal_data is None and _row["ADX"] < 18.0:
+        print(f"  [DIAG] Blocked by: ADX too low ({_row['ADX']:.2f} < 18.0)")
+    if signal_data is None and _atr_ratio < 0.50:
+        print(f"  [DIAG] Blocked by: ATR compression ({_atr_ratio:.2f} < 0.50)")
 
     # -------------------------------------------------------------------
     # Stop-loss — always checked first, no gate bypasses this
@@ -557,8 +638,8 @@ for symbol in COINS:
         # Gate 1 (implicit): position is None — coin is flat ✓
 
         # Gate 2: BTC regime filter
-        # BTC-USD bypasses this — it is the regime reference itself
-        if symbol != "BTC-USD":
+        # BTC/INR bypasses this — it is the regime reference itself
+        if symbol != "BTC/INR":
             if btc_regime is None:
                 print(f"  🚫 BTC regime NEUTRAL — entry blocked.")
                 print()

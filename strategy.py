@@ -3,6 +3,7 @@ import numpy as np
 from ta.trend import EMAIndicator, ADXIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
+from config import ADX_THRESHOLD, ATR_EXPANSION_RATIO
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +121,8 @@ def _is_ready(df: pd.DataFrame) -> bool:
 
 def generate_signal(
     df: pd.DataFrame,
-    adx_threshold: float = 25.0,
-    atr_expansion_ratio: float = 0.6,   # ATR must be >= 60 % of its 20-bar SMA
+    adx_threshold: float = ADX_THRESHOLD,
+    atr_expansion_ratio: float = ATR_EXPANSION_RATIO,
 ) -> dict | None:
     """
     Returns a signal dict or None.

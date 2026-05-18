@@ -22,10 +22,39 @@ COINS = [
 
 STOP_LOSS_PCT         = 0.04   # 4% adverse move closes the full position
 MAX_ALLOCATION        = 0.80   # never deploy more than 80% of cash at once
-MAX_POSITIONS_PER_DIR = 3      # [TIER 3] relaxed: allow up to 2 LONGs and 2 SHORTs simultaneously
+MAX_POSITIONS_PER_DIR = 3      # allow up to 3 LONGs and 3 SHORTs simultaneously
 TIMEFRAME             = "1h"
 RISK_PER_TRADE        = 0.10
 DATA_DIR              = "data"
+
+# ---------------------------------------------------------------------------
+# BTC Regime filter — recalibrated for CoinSwitch (INR candles ~2x noisier)
+# ---------------------------------------------------------------------------
+# Old Coinbase approach: hard AND gate (EMA200 AND Supertrend must both agree).
+# Problem: CoinSwitch BTC candles are 2x more volatile (0.55% vs 0.27% per bar),
+# causing Supertrend to flip every few bars around the EMA200, yielding permanent
+# NEUTRAL and blocking all altcoin entries.
+#
+# New approach: 3-indicator majority vote. 2-of-3 must agree:
+#   1. EMA200 (Close vs EMA200)
+#   2. Supertrend (confirmed over 2 consecutive bars to debounce noise)
+#   3. EMA20 vs EMA50 short-term momentum
+#
+# This tolerates one disagreeing indicator — exactly the noise profile seen
+# in the CoinSwitch comparison data.
+
+REGIME_ST_CONFIRM_BARS  = 2     # Supertrend must agree for this many consecutive bars
+                                 # before counting as a regime vote (debounces flips)
+REGIME_VOTE_THRESHOLD   = 2     # out of 3 indicators must agree for LONG or SHORT
+
+# ---------------------------------------------------------------------------
+# Signal generation — recalibrated for CoinSwitch noise
+# ---------------------------------------------------------------------------
+# CoinSwitch INR pairs trend at lower ADX readings than USD pairs on Coinbase
+# because INR volatility inflates ATR without adding directional trend strength.
+
+ADX_THRESHOLD       = 18.0   # was 25.0 on Coinbase; CS INR pairs trend at lower ADX
+ATR_EXPANSION_RATIO = 0.50   # was 0.60; CS ATR is noisier so ratio vs SMA runs lower
 
 # ---------------------------------------------------------------------------
 # Tier 1 — Partial profit-taking (scale-out at first target)
