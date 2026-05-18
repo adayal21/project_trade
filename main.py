@@ -601,14 +601,20 @@ log_portfolio(cash, equity, open_positions, realized_pnl, unrealized, total_trad
 print("=" * 50)
 print("Portfolio Snapshot")
 print("=" * 50)
+
 allocated_capital = INITIAL_CAPITAL - cash
+
 print(f"Allocated    : ${allocated_capital:.2f}")
 print(f"Cash         : ${cash:.2f}")
 print(f"Unrealized   : ${unrealized:.2f}")
 print(f"Equity       : ${equity:.2f}")
 print(f"Realized PnL : ${realized_pnl:.2f}")
 print(f"BTC Regime   : {btc_regime or 'NEUTRAL'}")
-print(f"Open         : {open_positions} | Trades this run: {trades_this_run}")
+print(
+    f"Open         : {open_positions} | "
+    f"Trades this run: {trades_this_run}"
+)
+
 print("=" * 50)
 
 # ---------------------------------------------------------------------------
