@@ -22,11 +22,17 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # State helpers
 # ---------------------------------------------------------------------------
 
+def safe_symbol(symbol: str) -> str:
+    return symbol.replace("/", "_")
+
+
 def get_position_file(symbol: str) -> str:
+    symbol = safe_symbol(symbol)
     return f"{DATA_DIR}/{symbol}_position.csv"
 
 
 def get_trade_file(symbol: str) -> str:
+    symbol = safe_symbol(symbol)
     return f"{DATA_DIR}/{symbol}_trades.csv"
 
 
