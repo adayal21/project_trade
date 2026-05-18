@@ -16,7 +16,7 @@ COINS = [
 
 STOP_LOSS_PCT         = 0.04   # 4% adverse move closes the full position
 MAX_ALLOCATION        = 0.80   # never deploy more than 80% of cash at once
-MAX_POSITIONS_PER_DIR = 2      # [TIER 3] relaxed: allow up to 2 LONGs and 2 SHORTs simultaneously
+MAX_POSITIONS_PER_DIR = 3      # [TIER 3] relaxed: allow up to 2 LONGs and 2 SHORTs simultaneously
 TIMEFRAME             = "1h"
 RISK_PER_TRADE        = 0.10
 DATA_DIR              = "data"
