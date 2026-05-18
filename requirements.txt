@@ -2,5 +2,6 @@
 pandas
 numpy
 requests 
+cryptography
 ta
 

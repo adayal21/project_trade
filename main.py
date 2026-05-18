@@ -2,6 +2,8 @@ import os
 import pandas as pd
 import requests
 from datetime import datetime, timedelta, timezone
+from auth import make_signature
+from config import API_KEY, BASE_URL, EXCHANGE
 
 from config import (
     COINS, DATA_DIR, INITIAL_CAPITAL, RISK_PER_TRADE, STOP_LOSS_PCT,
@@ -112,16 +114,43 @@ def get_btc_regime(coins_data: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 def fetch_data(symbol: str) -> pd.DataFrame:
-    end   = datetime.now(timezone.utc)
-    start = end - timedelta(days=12)
 
-    url     = f"https://api.exchange.coinbase.com/products/{symbol}/candles"
-    params  = {"granularity": 3600, "start": start.isoformat(), "end": end.isoformat()}
-    headers = {"User-Agent": "Mozilla/5.0"}
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    response = requests.get(url, params=params, headers=headers, timeout=10)
+    start_ms = end_ms - (20 * 24 * 60 * 60 * 1000)
 
-    print(f"  URL: {response.url}")
+    endpoint = "/trade/api/v2/candles"
+
+    params = {
+        "exchange": EXCHANGE,
+        "symbol": symbol,
+        "interval": "60",
+        "start_time": str(start_ms),
+        "end_time": str(end_ms),
+    }
+
+    endpoint, epoch_time, signature = make_signature(
+        "GET",
+        endpoint,
+        params
+    )
+
+    url = BASE_URL + endpoint
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-AUTH-APIKEY": API_KEY,
+        "X-AUTH-SIGNATURE": signature,
+        "X-AUTH-EPOCH": epoch_time,
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=10
+    )
+
+    print(f"  URL: {url}")
     print(f"  HTTP Status: {response.status_code}")
 
     try:
@@ -131,18 +160,38 @@ def fetch_data(symbol: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     if response.status_code != 200:
-        print(f"  Coinbase error: {data}")
+        print(f"  CoinSwitch error: {data}")
         return pd.DataFrame()
 
-    if not isinstance(data, list) or len(data) == 0:
+    candles = data["data"]
+
+    if len(candles) == 0:
         print(f"  Empty candles for {symbol}")
         return pd.DataFrame()
 
-    df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
-    df['time'] = pd.to_datetime(df['time'], unit='s')
-    df = df.sort_values('time')
-    df.rename(columns={"open": "Open", "high": "High", "low": "Low",
-                        "close": "Close", "volume": "Volume"}, inplace=True)
+    df = pd.DataFrame(candles)
+
+    df.rename(columns={
+        "o": "Open",
+        "h": "High",
+        "l": "Low",
+        "c": "Close",
+        "volume": "Volume",
+        "start_time": "time"
+    }, inplace=True)
+
+    df["time"] = pd.to_datetime(
+        pd.to_numeric(df["time"]),
+        unit="ms"
+    )
+
+    numeric_cols = ["Open", "High", "Low", "Close", "Volume"]
+
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col])
+
+    df = df.sort_values("time")
+
     df.set_index("time", inplace=True)
 
     return df

@@ -1,13 +1,19 @@
 INITIAL_CAPITAL = 10000
 
+API_KEY = "38b6bfd0bb3971832f66b726a1e34c31b02c4447fd8e9b295df729edc7f903ca"
+API_SECRET = "daa9575ba1a6f3de50e46d787b8a54ed2b4162d4c691acaa3663da9e84305347"
+BASE_URL = "https://coinswitch.co"
+
+EXCHANGE = "coinswitchx"
+
 COINS = [
-    "BTC-USD",
-    "ETH-USD",
-    "XRP-USD",
-    "BNB-USD",
-    "DOGE-USD",
-    "LINK-USD",
-    "LTC-USD"
+    "BTC/INR",
+    "ETH/INR",
+    "XRP/INR",
+    "BNB/INR",
+    "DOGE/INR",
+    "LINK/INR",
+    "LTC/INR"
 ]
 
 # ---------------------------------------------------------------------------
