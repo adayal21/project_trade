@@ -10,7 +10,7 @@ from config import (
     MAX_ALLOCATION, MAX_POSITIONS_PER_DIR,
     PARTIAL_TAKE_PROFIT_PCT, PARTIAL_EXIT_RATIO,
     TRAILING_STOP_PCT,
-    MAX_HOLD_BARS, TIME_EXIT_MIN_MOVE_PCT,
+    MAX_HOLD_BARS, MAX_HOLD_BARS_LOSING, TIME_EXIT_MIN_MOVE_PCT,
     MAX_HOLD_BARS_EXTENDED, MAX_HOLD_BARS_TRAIL,
 )
 from strategy import apply_indicators, generate_signal
@@ -22,17 +22,11 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # State helpers
 # ---------------------------------------------------------------------------
 
-def safe_symbol(symbol: str) -> str:
-    return symbol.replace("/", "_")
-
-
 def get_position_file(symbol: str) -> str:
-    symbol = safe_symbol(symbol)
     return f"{DATA_DIR}/{symbol}_position.csv"
 
 
 def get_trade_file(symbol: str) -> str:
-    symbol = safe_symbol(symbol)
     return f"{DATA_DIR}/{symbol}_trades.csv"
 
 
@@ -351,19 +345,16 @@ for symbol in COINS:
     print(f"  [DIAG] RSI={_row['RSI']:.2f}  ADX={_row['ADX']:.2f}(thr=18)  "
           f"Supertrend={'BULL' if _row['Supertrend'] else 'BEAR'}")
     print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
-          f"Ratio={_atr_ratio:.2f}(thr=0.50)  "
-          f"ATR_OK={_atr_ok}")
+          f"Ratio={_atr_ratio:.2f}(thr=0.50)  ATR_OK={_atr_ok}")
     print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_SMA={_row['Volume_SMA']:.2f}  "
           f"Vol_OK={_row['Volume'] > _row['Volume_SMA']}")
     print(f"  [DIAG] Signal={signal_dir or 'NONE'}")
-    # Explain exactly why signal is None
     if signal_data is None:
         if not _adx_ok:
             print(f"  [DIAG] ✗ Blocked: ADX too low ({_row['ADX']:.2f} < 18.0)")
         elif not _atr_ok:
             print(f"  [DIAG] ✗ Blocked: ATR compression ({_atr_ratio:.2f} < 0.50)")
         else:
-            # Hard filters passed — directional conditions failed
             _ema_long  = latest_price > _row["EMA200"]
             _st_bull   = bool(_row["Supertrend"])
             _rsi_long  = _row["RSI"] > 50
@@ -599,10 +590,21 @@ for symbol in COINS:
         tier4_exit    = False
         tier4_reason  = ""
 
-        # 4A — truly stagnant
+        # 4A — truly stagnant: held long enough with no meaningful move either way
         if not tier4_exit and bars_held >= MAX_HOLD_BARS and abs(move_pct) < TIME_EXIT_MIN_MOVE_PCT:
             tier4_exit   = True
             tier4_reason = f"TIME_EXIT_STAGNANT ({bars_held} bars, move={move_pct:.2%})"
+
+        # 4D — losing position timeout: signal thesis failed, cut before stop-loss
+        # Fires after just MAX_HOLD_BARS_LOSING (3h) of continuous loss — no point
+        # waiting 6 bars when the trade has been underwater since entry.
+        # Only fires when Tier 1 hasn't triggered — once partial profit was taken
+        # the trade was validated; let trailing stop manage the remainder instead.
+        if not tier4_exit and not already_partial \
+                and bars_held >= MAX_HOLD_BARS_LOSING \
+                and move_pct < 0:
+            tier4_exit   = True
+            tier4_reason = f"TIME_EXIT_LOSING ({bars_held} bars, move={move_pct:.2%})"
 
         # 4B — stuck below partial-profit target (Tier 1 never triggered)
         if not tier4_exit and not already_partial \

@@ -20,7 +20,9 @@ COINS = [
 # Core risk constants
 # ---------------------------------------------------------------------------
 
-STOP_LOSS_PCT         = 0.04   # 4% adverse move closes the full position
+STOP_LOSS_PCT         = 0.025  # tightened from 0.04 → CoinSwitch is 2x noisier;
+                               # hard stop now at -2.5% (catastrophe brake only —
+                               # TIME_EXIT_LOSING fires first at MAX_HOLD_BARS)
 MAX_ALLOCATION        = 0.80   # never deploy more than 80% of cash at once
 MAX_POSITIONS_PER_DIR = 3      # allow up to 3 LONGs and 3 SHORTs simultaneously
 TIMEFRAME             = "1h"
@@ -73,14 +75,17 @@ TRAILING_STOP_PCT        = 0.015  # trail 1.5% below the highest-water-mark pric
 # ---------------------------------------------------------------------------
 # Tier 4 — Time-based exit backstop
 # ---------------------------------------------------------------------------
+# 4A  Stagnant : bars >= MAX_HOLD_BARS AND |move| < 0.5%  → no movement, cut it
+# 4D  Losing   : bars >= MAX_HOLD_BARS_LOSING AND move < 0% → thesis failed, cut early
+#                3 bars = 3 hours of continuous loss on 1h timeframe; no point waiting
+#                (fires before the hard stop-loss; only when Tier 1 hasn't fired)
+# 4B  Stuck+   : bars >= MAX_HOLD_BARS_EXTENDED AND 0 < move < +2% → take small gain
+# 4C  Trail TO : Tier 1 fired AND bars >= MAX_HOLD_BARS_TRAIL → exit remaining half
 
-MAX_HOLD_BARS            = 6      # if a position has been open >= 6 bars with no
-                                  # meaningful move, close it and free up capital
-TIME_EXIT_MIN_MOVE_PCT   = 0.005  # "meaningful move" threshold: if |move| < 0.5%
-                                  # after MAX_HOLD_BARS, trigger the time exit
+MAX_HOLD_BARS            = 6      # bars before 4A (stagnant) time exit is eligible
+MAX_HOLD_BARS_LOSING     = 3      # bars before 4D (losing) time exit fires — 3h of
+                                  # continuous loss means thesis is dead, cut it fast
+TIME_EXIT_MIN_MOVE_PCT   = 0.005  # 4A threshold: |move| < 0.5% = stagnant
 
-MAX_HOLD_BARS_EXTENDED   = 12     # if a position is up but stuck below the +2% partial
-                                  # take-profit target after this many bars, exit with
-                                  # whatever small gain exists rather than waiting forever
-MAX_HOLD_BARS_TRAIL      = 10     # after Tier 1 partial exit fires, close the remaining
-                                  # half if it hasn't trailed out within this many bars
+MAX_HOLD_BARS_EXTENDED   = 12     # 4B: exit stuck-profitable positions after this many bars
+MAX_HOLD_BARS_TRAIL      = 10     # 4C: close trailing half after this many bars post Tier 1
