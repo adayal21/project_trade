@@ -36,22 +36,48 @@ else:
     INITIAL_CAPITAL = 10000
 
 COINS = [
-    # Regime reference — never traded, used only for BTC regime gate
+    # -----------------------------------------------------------------------
+    # Regime reference — never traded, only used for BTC macro regime gate
+    # -----------------------------------------------------------------------
     "BTC/INR",
 
-    # Tier 2 — low-to-moderate BTC correlation, good CoinDCX volume
-    "ETH/INR",    # corr=0.22 — most independent of BTC on INR markets
-    "XRP/INR",    # corr=0.59 — massive INR volume, moves on own news
-    "ATOM/INR",   # corr=0.48 — Cosmos ecosystem, own narrative
-    "SHIB/INR",   # corr=0.66 — meme dynamics, very high volume
+    # -----------------------------------------------------------------------
+    # Band 1 — very low / negative BTC correlation (most independent)
+    # These can move against BTC direction entirely
+    # -----------------------------------------------------------------------
+    "ETH/INR",    # corr=+0.22 — Layer 1, most independent on INR markets
+    "CHZ/INR",    # corr=-0.17 — Sports/fan tokens, event-driven
+    "DENT/INR",   # corr=-0.43 — Telecom data token, strongly decorrelated
+    "HOT/INR",    # corr=+0.33 — Holochain/Web3, own ecosystem, high volume
+    "ATOM/INR",   # corr=+0.47 — Cosmos IBC, proven independent (live trade hit)
+    "AAVE/INR",   # corr=+0.48 — DeFi lending, protocol-driven narrative
 
-    # Tier 3 — moderate BTC correlation, diverse ecosystems
-    "BNB/INR",    # corr=0.70 — exchange token dynamics
-    "TRX/INR",    # corr=0.73 — Tron ecosystem, excellent volume
-    "SOL/INR",    # corr=0.76 — Solana ecosystem plays
-    "DOT/INR",    # corr=0.75 — Polkadot parachain narrative
-    "AVAX/INR",   # corr=0.77 — Avalanche DeFi ecosystem
-    "UNI/INR",    # corr=0.78 — DeFi token, own protocol narrative
+    # -----------------------------------------------------------------------
+    # Band 2 — low-moderate BTC correlation (moves partly independently)
+    # -----------------------------------------------------------------------
+    "XRP/INR",    # corr=+0.59 — Payments/remittance, regulatory news driven
+    "NEAR/INR",   # corr=+0.60 — Layer 1, own developer ecosystem
+    "VET/INR",    # corr=+0.65 — Supply chain, enterprise partnerships driven
+    "SHIB/INR",   # corr=+0.65 — Meme, community/social driven, huge volume
+    "WIN/INR",    # corr=+0.68 — Gaming/TRON ecosystem, very high volume
+    "GALA/INR",   # corr=+0.70 — Gaming token, own game launches
+    "BNB/INR",    # corr=+0.70 — Exchange token, own exchange dynamics
+    "SUSHI/INR",  # corr=+0.70 — DEX protocol, DeFi narrative
+
+    # -----------------------------------------------------------------------
+    # Band 3 — moderate BTC correlation, but diverse sectors
+    # Each has its own narrative that can diverge for hours/days
+    # -----------------------------------------------------------------------
+    "ALGO/INR",   # corr=+0.72 — Layer 1 / payments, institutional focus
+    "TRX/INR",    # corr=+0.72 — Layer 1 / content, TRON ecosystem
+    "FIL/INR",    # corr=+0.74 — Decentralised storage, independent demand
+    "DOT/INR",    # corr=+0.75 — Parachain, own governance narrative
+    "CRV/INR",    # corr=+0.75 — DEX stableswap, unique DeFi niche
+    "SOL/INR",    # corr=+0.76 — Solana ecosystem, own developer community
+    "GRT/INR",    # corr=+0.76 — Data indexing, unique sector
+    "AVAX/INR",   # corr=+0.77 — Layer 1 DeFi, own subnet ecosystem
+    "SNX/INR",    # corr=+0.78 — Synthetic assets, unique DeFi product
+    "UNI/INR",    # corr=+0.78 — Largest DEX, DeFi governance narrative
 ]
 
 # ---------------------------------------------------------------------------
@@ -64,7 +90,7 @@ COINS = [
 STOP_LOSS_PCT         = 0.040  # hard stop — catastrophe brake. TIME_EXIT_LOSING
                                # typically fires first at MAX_HOLD_BARS_LOSING.
 MAX_ALLOCATION        = 0.80   # never deploy more than 80% of equity at once
-MAX_POSITIONS_PER_DIR = 5      # allow up to 5 LONGs simultaneously (10 coins, max 50% in trades)
+MAX_POSITIONS_PER_DIR = 5      # allow up to 5 LONGs simultaneously (25 coins, max 20% in trades)
 TIMEFRAME             = "1h"
 RISK_PER_TRADE        = 0.10
 DATA_DIR              = "data"

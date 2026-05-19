@@ -395,14 +395,26 @@ if btc_breakdown:
 print()
 
 # ------------------------------------------------------------------
-# Step 3: Process each coin.
-# Cache open-position direction counts once — avoids O(N²) disk reads
-# (count_open_by_direction reads every coin's position file; calling it
-# inside the per-coin loop would re-read N files for each of N coins).
-# Refreshed after any trade that opens or closes a position.
+# ------------------------------------------------------------------
+# Step 3A: Evaluate all coins — collect signals, manage open positions.
+# ------------------------------------------------------------------
+# Two-pass architecture:
+#   Pass 1 (Step 3A): iterate all coins in list order.
+#                     - Manage exits on open positions (always processed).
+#                     - Collect entry candidates (coins that are flat + have signal).
+#   Pass 2 (Step 3B): rank candidates by signal quality, enter best ones first.
+#
+# This fixes entry-order bias: previously the first 5 coins in the list
+# would always win when >5 signals fired simultaneously. Now the highest-
+# conviction signal (score 4/4, tiebreak by ADX) enters first regardless
+# of list position.
+#
+# Ranking key: (soft_confirmations DESC, adx DESC)
+#   4/4 + ADX=38 beats 3/4 + ADX=25 which beats 2/4 + ADX=30
 # ------------------------------------------------------------------
 
 dir_counts_cache = count_open_by_direction()
+entry_candidates = []   # list of (symbol, signal_data, df) to rank and enter
 
 for symbol in COINS:
     print(f"--- {symbol} ---")
@@ -769,14 +781,16 @@ for symbol in COINS:
             })
 
     # -------------------------------------------------------------------
-    # Entry — three sequential gates (Tier 3: MAX_POSITIONS_PER_DIR = 2)
+    # Entry candidate collection (Pass 1)
+    # Gates 1, 1.5, 2 are checked here.
+    # Gate 3 (position count) and capital guard are checked in Pass 2
+    # after ranking, so the best signal always enters first.
     # -------------------------------------------------------------------
     if position is None and signal_dir is not None:
 
         # Gate 1 (implicit): position is None — coin is flat ✓
 
-        # Gate 1.5: RSI reset filter — blocks re-entry after a losing trade
-        # until RSI has materially reset in the signal direction.
+        # Gate 1.5: RSI reset filter
         rsi_ok, rsi_block_reason = rsi_reset_allows_entry(symbol, signal_dir, df)
         if not rsi_ok:
             print(f"  🚫 RSI reset: {rsi_block_reason}")
@@ -784,26 +798,12 @@ for symbol in COINS:
             continue
 
         # Gate 2: BTC regime filter
-        # BTC/INR bypasses this — it is the regime reference itself.
-        #
-        # In LONG_ONLY mode:
-        #   - BTC LONG    → allow
-        #   - BTC NEUTRAL → allow (REGIME_ALLOWS_LONG_IN_NEUTRAL=True)
-        #   - BTC SHORT   → normally block, BUT allow if the coin's own score
-        #                   >= REGIME_OVERRIDE_MIN_SCORE (3/4) AND not counter-trend.
-        #                   A coin scoring 3+ with Supertrend bull and above its own
-        #                   EMA200 is showing genuine independent momentum.
-        #
-        # In LONG+SHORT mode: original strict behaviour unchanged.
         if symbol != "BTC/INR":
             if LONG_ONLY:
                 if btc_regime == "SHORT":
-                    # Check for high-conviction independent override
-                    coin_score    = signal_data.get('soft_confirmations', 0)
-                    is_ct         = signal_data.get('counter_trend', True)
-                    regime_override = (
-                        coin_score >= REGIME_OVERRIDE_MIN_SCORE and not is_ct
-                    )
+                    coin_score      = signal_data.get('soft_confirmations', 0)
+                    is_ct           = signal_data.get('counter_trend', True)
+                    regime_override = coin_score >= REGIME_OVERRIDE_MIN_SCORE and not is_ct
                     if regime_override:
                         print(f"  ⚡ BTC regime SHORT overridden — "
                               f"coin score {coin_score}/4, not counter-trend.")
@@ -812,11 +812,10 @@ for symbol in COINS:
                         print()
                         continue
                 if btc_regime is None and not REGIME_ALLOWS_LONG_IN_NEUTRAL:
-                    print(f"  🚫 BTC regime NEUTRAL — entry blocked (REGIME_ALLOWS_LONG_IN_NEUTRAL=False).")
+                    print(f"  🚫 BTC regime NEUTRAL — entry blocked.")
                     print()
                     continue
             else:
-                # Original strict behaviour: any mismatch or NEUTRAL blocks
                 if btc_regime is None:
                     print(f"  🚫 BTC regime NEUTRAL — entry blocked.")
                     print()
@@ -826,7 +825,63 @@ for symbol in COINS:
                     print()
                     continue
 
-        # Gate 3: Correlation guard (Tier 3 — now allows up to MAX_POSITIONS_PER_DIR=2)
+        # Passed gates 1, 1.5, 2 — add to ranked candidate pool
+        score = signal_data.get('soft_confirmations', 0)
+        adx   = float(signal_data.get('adx', 0))
+        print(f"  📋 Candidate queued — score={score}/4  ADX={adx:.1f}  "
+              f"(will rank against other candidates before entering)")
+        entry_candidates.append((symbol, signal_data, df))
+        # Queued as candidate — entry handled in Step 3B ranked pass.
+        pass
+
+    elif signal_dir is None and position is None:
+        print(f"  No signal.")
+
+    elif position is not None and signal_dir == position['Side']:
+        print(f"  Holding {position['Side']} (signal agrees, no action).")
+
+    print()
+
+# ---------------------------------------------------------------------------
+# Step 3B: Ranked entry — enter best candidates first
+# ---------------------------------------------------------------------------
+# Sort all entry candidates by:
+#   1. soft_confirmations DESC (4/4 before 3/4 before 2/4)
+#   2. ADX DESC as tiebreaker (stronger trend gets priority)
+#
+# Then run Gate 3 (position count) and capital guard in rank order.
+# This ensures the highest-conviction signal always enters, regardless
+# of coin list position.
+
+if entry_candidates:
+    # Sort: highest score first, then highest ADX as tiebreaker
+    entry_candidates.sort(
+        key=lambda x: (
+            x[1].get('soft_confirmations', 0),   # score DESC
+            float(x[1].get('adx', 0))            # ADX DESC
+        ),
+        reverse=True
+    )
+
+    print()
+    print(f"--- Entry Ranking ({len(entry_candidates)} candidate(s)) ---")
+    for rank, (sym, sig, _) in enumerate(entry_candidates, 1):
+        print(f"  #{rank} {sym:<14} score={sig.get('soft_confirmations',0)}/4  "
+              f"ADX={sig.get('adx',0):.1f}  "
+              f"CT={'yes' if sig.get('counter_trend') else 'no'}")
+    print()
+
+    for symbol, signal_data, df in entry_candidates:
+        signal_dir   = signal_data["signal"]
+        latest_price = float(df["Close"].iloc[-1])
+
+        is_counter_trend = signal_data.get('counter_trend', False)
+        effective_tp     = COUNTER_TREND_TP_PCT    if is_counter_trend else PARTIAL_TAKE_PROFIT_PCT
+        effective_trail  = COUNTER_TREND_TRAIL_PCT if is_counter_trend else TRAILING_STOP_PCT
+
+        print(f"--- {symbol} (ranked entry) ---")
+
+        # Gate 3: position count — checked here so ranking takes effect
         dir_counts = dir_counts_cache
         if dir_counts[signal_dir] >= MAX_POSITIONS_PER_DIR:
             print(f"  🚫 Correlation guard — already {dir_counts[signal_dir]} "
@@ -838,25 +893,23 @@ for symbol in COINS:
         allocation = cash * RISK_PER_TRADE
         total_capital = cash + sum(
             float(load_position(s)['Entry Price']) * float(load_position(s)['Quantity'])
-            for s in COINS
-            if load_position(s) is not None
+            for s in COINS if load_position(s) is not None
         )
         deployed = total_capital - cash
-        if deployed / total_capital >= MAX_ALLOCATION:
-            print(f"  🚫 Capital guard — {deployed/total_capital:.0%} deployed exceeds MAX_ALLOCATION={MAX_ALLOCATION:.0%}.")
+        if total_capital > 0 and deployed / total_capital >= MAX_ALLOCATION:
+            print(f"  🚫 Capital guard — {deployed/total_capital:.0%} deployed "
+                  f"exceeds MAX_ALLOCATION={MAX_ALLOCATION:.0%}.")
             print()
             continue
-        if allocation <= 0:
-            print(f"  🚫 No cash available.")
+
+        if allocation <= 0 or cash < allocation:
+            print(f"  🚫 Insufficient cash (₹{cash:.2f}) for allocation ₹{allocation:.2f}.")
             print()
             continue
 
         quantity = allocation / latest_price
 
-        is_ct = signal_data.get('counter_trend', False)
-
         # Live mode: place real buy order BEFORE saving position.
-        # If the order fails, we do NOT save the position — no phantom trades.
         if TRADING_MODE == "live":
             from exchange import place_market_order, get_order_status
             order_id = place_market_order(symbol, "buy", quantity)
@@ -864,7 +917,6 @@ for symbol in COINS:
                 print(f"  ✗ Live order failed — skipping position save.")
                 print()
                 continue
-            # Wait briefly then confirm fill and get actual fill price
             import time as _t
             _t.sleep(1.5)
             order_info  = get_order_status(order_id)
@@ -877,24 +929,26 @@ for symbol in COINS:
                 print(f"  ✗ Order not filled (status={fill_status}) — skipping.")
                 print()
                 continue
-            # Use actual fill price and quantity, not the signal price
             latest_price = fill_price
             quantity     = fill_qty
 
+        is_ct = signal_data.get('counter_trend', False)
         save_position(symbol, {
             "Coin":          symbol,
             "Side":          signal_dir,
             "Entry Price":   latest_price,
             "Quantity":      quantity,
             "Timestamp":     datetime.now(timezone.utc),
-            "Partial_Taken": 0,           # Tier 1 not yet fired
-            "Trail_HWM":     latest_price, # Tier 2 high-water mark seed
-            "Bars_Held":     0,            # Tier 4 counter
-            "Counter_Trend": int(is_ct),  # 1=bounce below EMA200, 0=trend long
+            "Partial_Taken": 0,
+            "Trail_HWM":     latest_price,
+            "Bars_Held":     0,
+            "Counter_Trend": int(is_ct),
         })
 
         cash -= allocation
         dir_counts_cache = count_open_by_direction()  # refresh after open
+        total_trades += 1
+        trades_this_run += 1
 
         print(f"  ✅ Entered {signal_dir} @ {latest_price:.4f}")
         print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f}")
@@ -907,14 +961,7 @@ for symbol in COINS:
             print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (counter-trend targets)")
         else:
             print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (trend targets)")
-
-    elif signal_dir is None and position is None:
-        print(f"  No signal.")
-
-    elif position is not None and signal_dir == position['Side']:
-        print(f"  Holding {position['Side']} (signal agrees, no action).")
-
-    print()
+        print()
 
 # ---------------------------------------------------------------------------
 # Portfolio snapshot
