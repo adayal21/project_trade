@@ -4,6 +4,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 from config import (
+    TRADING_MODE,
     COINS, DATA_DIR, INITIAL_CAPITAL, RISK_PER_TRADE, STOP_LOSS_PCT,
     MAX_ALLOCATION, MAX_POSITIONS_PER_DIR,
     PARTIAL_TAKE_PROFIT_PCT, PARTIAL_EXIT_RATIO,
@@ -312,10 +313,41 @@ def load_portfolio_state() -> dict:
 
 initialize_portfolio()
 
-state        = load_portfolio_state()
-cash         = state['cash']
-realized_pnl = state['realized_pnl']
-total_trades = state['total_trades']
+# ---------------------------------------------------------------------------
+# Live trading startup — reconcile and read real balance if TRADING_MODE=live
+# ---------------------------------------------------------------------------
+if TRADING_MODE == "live":
+    from exchange import (
+        get_live_inr_balance, reconcile_positions, run_connectivity_test
+    )
+    print("=" * 50)
+    print(f"TRADING MODE: LIVE — real orders will be placed")
+    print("=" * 50)
+
+    # Step 1: Reconcile local position files with actual exchange holdings.
+    # This catches any drift caused by manual trades, crashes, or partial fills.
+    print("Reconciling positions with CoinDCX account...")
+    reconcile_positions(COINS, load_position, save_position, clear_position)
+
+    # Step 2: Read actual INR balance from exchange.
+    # In live mode, cash is always the real available INR — never from CSV.
+    live_inr = get_live_inr_balance()
+    print(f"Live INR balance: ₹{live_inr:.2f}")
+
+    # Load realized P&L and trade count from CSV history (these are our records,
+    # not the exchange's — exchange doesn't track these for us)
+    state        = load_portfolio_state()
+    cash         = live_inr          # OVERRIDE: use real balance, not CSV cash
+    realized_pnl = state['realized_pnl']
+    total_trades = state['total_trades']
+
+else:
+    print(f"TRADING MODE: PAPER — simulating trades, no real orders placed")
+    state        = load_portfolio_state()
+    cash         = state['cash']
+    realized_pnl = state['realized_pnl']
+    total_trades = state['total_trades']
+
 trades_this_run = 0
 
 # ------------------------------------------------------------------
@@ -460,6 +492,10 @@ for symbol in COINS:
                 "Exit Time":   datetime.now(timezone.utc)
             })
 
+            # Live mode: place real sell order
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(symbol, "sell", quantity)
             clear_position(symbol)
             dir_counts_cache = count_open_by_direction()  # refresh after close
             position = None
@@ -504,6 +540,11 @@ for symbol in COINS:
                 "Exit Reason": "PARTIAL_PROFIT",
                 "Exit Time":   datetime.now(timezone.utc)
             })
+
+            # Live mode: sell the partial exit quantity
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(symbol, "sell", exit_qty)
 
             # Update the position: smaller quantity, Tier 1 done,
             # seed the trailing high-water mark at current price
@@ -580,6 +621,9 @@ for symbol in COINS:
                     "Exit Time":   datetime.now(timezone.utc)
                 })
 
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(symbol, "sell", quantity)
                 clear_position(symbol)
                 dir_counts_cache = count_open_by_direction()  # refresh after close
                 position = None
@@ -619,6 +663,9 @@ for symbol in COINS:
                 "Exit Time":   datetime.now(timezone.utc)
             })
 
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(symbol, "sell", quantity)
             clear_position(symbol)
             dir_counts_cache = count_open_by_direction()  # refresh after close
             position = None
@@ -702,6 +749,9 @@ for symbol in COINS:
                 "Exit Time":   datetime.now(timezone.utc)
             })
 
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(symbol, "sell", quantity)
             clear_position(symbol)
             dir_counts_cache = count_open_by_direction()  # refresh after close
             position = None
@@ -789,6 +839,33 @@ for symbol in COINS:
         quantity = allocation / latest_price
 
         is_ct = signal_data.get('counter_trend', False)
+
+        # Live mode: place real buy order BEFORE saving position.
+        # If the order fails, we do NOT save the position — no phantom trades.
+        if TRADING_MODE == "live":
+            from exchange import place_market_order, get_order_status
+            order_id = place_market_order(symbol, "buy", quantity)
+            if order_id is None:
+                print(f"  ✗ Live order failed — skipping position save.")
+                print()
+                continue
+            # Wait briefly then confirm fill and get actual fill price
+            import time as _t
+            _t.sleep(1.5)
+            order_info  = get_order_status(order_id)
+            fill_status = order_info.get("status", "unknown")
+            fill_price  = float(order_info.get("avg_price", latest_price) or latest_price)
+            fill_qty    = float(order_info.get("total_quantity", quantity) or quantity) -                           float(order_info.get("remaining_quantity", 0) or 0)
+            print(f"  [live] Order {order_id}: status={fill_status} "
+                  f"fill_price={fill_price:.4f} filled_qty={fill_qty:.6f}")
+            if fill_status not in ("filled", "partially_filled"):
+                print(f"  ✗ Order not filled (status={fill_status}) — skipping.")
+                print()
+                continue
+            # Use actual fill price and quantity, not the signal price
+            latest_price = fill_price
+            quantity     = fill_qty
+
         save_position(symbol, {
             "Coin":          symbol,
             "Side":          signal_dir,

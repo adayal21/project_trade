@@ -1,4 +1,39 @@
-INITIAL_CAPITAL = 10000
+# ---------------------------------------------------------------------------
+# Environment — load .env file if present (local dev and GCP server)
+# ---------------------------------------------------------------------------
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass   # python-dotenv not installed — env vars must be set manually
+
+# ---------------------------------------------------------------------------
+# Trading mode
+# ---------------------------------------------------------------------------
+# "paper" → simulate trades in CSV files, no real orders placed (default)
+# "live"  → connect to CoinDCX account, place real market orders
+#
+# Switch by changing this one value. Everything else is automatic.
+# Run connectivity_test.py first to verify your API keys work before
+# switching to live.
+
+import os
+TRADING_MODE = os.environ.get("TRADING_MODE", "paper")   # override via env var too
+
+# ---------------------------------------------------------------------------
+# Initial capital
+# ---------------------------------------------------------------------------
+# Paper mode : always ₹10,000 simulated
+# Live mode  : read from LIVE_INITIAL_CAPITAL env var (default ₹1,000)
+#
+# To change live capital, update your .env file:
+#   LIVE_INITIAL_CAPITAL=5000
+# No code change needed — just restart the bot.
+
+if TRADING_MODE == "live":
+    INITIAL_CAPITAL = float(os.environ.get("LIVE_INITIAL_CAPITAL", "1000"))
+else:
+    INITIAL_CAPITAL = 10000
 
 COINS = [
     # Regime reference — never traded, used only for BTC regime gate
@@ -98,8 +133,9 @@ MAX_HOLD_BARS_TRAIL      = 10     # 4C: close trailing half after this many bars
 
 RSI_RESET_SHORT = 45   # after losing SHORT: RSI must drop below this AND still falling
 RSI_RESET_LONG  = 55   # after losing LONG:  RSI must rise above this AND still rising
+
 # ---------------------------------------------------------------------------
-# Trading mode
+# Trading mode flags
 # ---------------------------------------------------------------------------
 # LONG_ONLY = True  → only LONG signals are generated and entered.
 #                     SHORT signals are suppressed entirely. Intended for
