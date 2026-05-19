@@ -177,3 +177,20 @@ COUNTER_TREND_TRAIL_PCT = 0.010   # tighter trail for bear-market bounces
 # Set to 2 — requires two independent confirmations.
 
 LONG_SOFT_REQUIRED = 2
+
+# ---------------------------------------------------------------------------
+# BTC regime override — high-conviction independent LONGs
+# ---------------------------------------------------------------------------
+# When BTC regime is SHORT, LONGs are normally blocked. However, if a coin's
+# own indicators score REGIME_OVERRIDE_MIN_SCORE or higher (out of 4) AND
+# the trade is NOT counter-trend (coin is above its own EMA200), the entry
+# is allowed despite the BTC SHORT regime.
+#
+# Rationale: a coin scoring 3/4 or 4/4 with Supertrend bullish and above its
+# own EMA200 is showing genuine independent momentum. At 0.73 correlation,
+# TRX for example can trend up while BTC is flat/down.
+#
+# Set to 5 to effectively disable this override (no score can reach 5/4).
+# Set to 3 to allow 3/4 or 4/4 independent LONGs through in BTC SHORT regime.
+
+REGIME_OVERRIDE_MIN_SCORE = 3

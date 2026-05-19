@@ -164,7 +164,10 @@ def generate_signal(
         return None
 
     # 2. Volatility filter: avoid low-volatility compression (false breakouts)
-    if latest['ATR'] < atr_expansion_ratio * latest['ATR_SMA']:
+    # Guard against ATR_SMA rounding to zero on very low-price coins (e.g. SHIB)
+    # where price precision causes ATR to appear as 0.0000. Skip the check rather
+    # than dividing by zero or blocking a valid signal on a precision artifact.
+    if latest['ATR_SMA'] > 0 and latest['ATR'] < atr_expansion_ratio * latest['ATR_SMA']:
         return None
 
     # ------------------------------------------------------------------

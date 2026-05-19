@@ -13,7 +13,7 @@ from config import (
     MAX_HOLD_BARS, MAX_HOLD_BARS_LOSING, TIME_EXIT_MIN_MOVE_PCT,
     MAX_HOLD_BARS_EXTENDED, MAX_HOLD_BARS_TRAIL,
     RSI_RESET_SHORT, RSI_RESET_LONG,
-    LONG_ONLY, REGIME_ALLOWS_LONG_IN_NEUTRAL,
+    LONG_ONLY, REGIME_ALLOWS_LONG_IN_NEUTRAL, REGIME_OVERRIDE_MIN_SCORE,
 )
 from strategy import apply_indicators, generate_signal
 from portfolio import initialize_portfolio, log_portfolio
@@ -785,17 +785,32 @@ for symbol in COINS:
 
         # Gate 2: BTC regime filter
         # BTC/INR bypasses this — it is the regime reference itself.
-        # In LONG_ONLY mode with REGIME_ALLOWS_LONG_IN_NEUTRAL=True:
-        #   - NEUTRAL regime allows LONG entries (uncertain, but not confirmed down)
-        #   - SHORT regime blocks LONG entries (market falling, don't buy)
-        # In normal (non-LONG_ONLY) mode: NEUTRAL blocks everything.
+        #
+        # In LONG_ONLY mode:
+        #   - BTC LONG    → allow
+        #   - BTC NEUTRAL → allow (REGIME_ALLOWS_LONG_IN_NEUTRAL=True)
+        #   - BTC SHORT   → normally block, BUT allow if the coin's own score
+        #                   >= REGIME_OVERRIDE_MIN_SCORE (3/4) AND not counter-trend.
+        #                   A coin scoring 3+ with Supertrend bull and above its own
+        #                   EMA200 is showing genuine independent momentum.
+        #
+        # In LONG+SHORT mode: original strict behaviour unchanged.
         if symbol != "BTC/INR":
             if LONG_ONLY:
-                # Only block if regime is a confirmed SHORT — NEUTRAL is fine
                 if btc_regime == "SHORT":
-                    print(f"  🚫 BTC regime SHORT — LONG entry blocked in bear market.")
-                    print()
-                    continue
+                    # Check for high-conviction independent override
+                    coin_score    = signal_data.get('soft_confirmations', 0)
+                    is_ct         = signal_data.get('counter_trend', True)
+                    regime_override = (
+                        coin_score >= REGIME_OVERRIDE_MIN_SCORE and not is_ct
+                    )
+                    if regime_override:
+                        print(f"  ⚡ BTC regime SHORT overridden — "
+                              f"coin score {coin_score}/4, not counter-trend.")
+                    else:
+                        print(f"  🚫 BTC regime SHORT — LONG entry blocked in bear market.")
+                        print()
+                        continue
                 if btc_regime is None and not REGIME_ALLOWS_LONG_IN_NEUTRAL:
                     print(f"  🚫 BTC regime NEUTRAL — entry blocked (REGIME_ALLOWS_LONG_IN_NEUTRAL=False).")
                     print()
