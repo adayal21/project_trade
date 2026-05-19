@@ -3,7 +3,7 @@ import numpy as np
 from ta.trend import EMAIndicator, ADXIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
-from config import ADX_THRESHOLD, ATR_EXPANSION_RATIO
+from config import ADX_THRESHOLD, ATR_EXPANSION_RATIO, LONG_ONLY, LONG_SOFT_REQUIRED
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +77,7 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # Trend
     df['EMA200'] = EMAIndicator(df['Close'], window=200).ema_indicator()
+    df['EMA50']  = EMAIndicator(df['Close'], window=50).ema_indicator()   # local trend for counter-trend longs
 
     # Momentum — keep the raw series; crossover logic lives in generate_signal
     df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
@@ -110,7 +111,7 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # NaN / length guard
 # ---------------------------------------------------------------------------
 
-_REQUIRED_COLUMNS = ['EMA200', 'RSI', 'Volume_Baseline', 'ATR', 'ATR_SMA', 'ADX',
+_REQUIRED_COLUMNS = ['EMA200', 'EMA50', 'RSI', 'Volume_Baseline', 'ATR', 'ATR_SMA', 'ADX',
                      'Supertrend', 'Supertrend_Upper', 'Supertrend_Lower']
 _MIN_BARS = 200   # driven by EMA200 warm-up
 
@@ -136,11 +137,12 @@ def generate_signal(
 
     Improvements vs original:
       1. NaN / length guard before any indexing.
-      2. RSI *crossover* (50-line) replaces raw RSI threshold — better timing.
+      2. RSI > 52 level replaces strict crossover — fires on genuine momentum.
       3. ATR expansion filter — skips entries during volatility compression.
       4. ADX regime filter — skips entries in ranging / choppy markets.
-      5. 3-of-4 scoring on confirmations; EMA200 + Supertrend are mandatory.
-      6. Returns metadata dict instead of a bare string.
+      5. Supertrend mandatory; EMA200 demoted to soft condition (bear bounces).
+      6. 4-soft scoring (RSI, Volume, EMA200, EMA50) — need 2 of 4.
+      7. counter_trend flag when EMA200 not satisfied — tighter exits applied.
 
     Parameters
     ----------
@@ -170,26 +172,47 @@ def generate_signal(
     # ------------------------------------------------------------------
 
     # --- LONG ---
-    ema_long        = latest['Close'] > latest['EMA200']          # mandatory
-    supertrend_long = latest['Supertrend']                        # mandatory
-    # RSI 50-line crossover (prev bar below/above, current bar above/below)
-    rsi_long  = prev['RSI'] <= 50 and latest['RSI'] > 50
-    volume_long     = latest['Volume'] > latest['Volume_Baseline'] # busier than median bar
+    # Supertrend bullish is the ONLY hard mandatory condition.
+    # EMA200 is demoted to a soft condition so bear-market bounces are
+    # capturable — when price is below EMA200 but Supertrend flips bullish
+    # locally, a genuine bounce can still be entered.
+    #
+    # 4 soft conditions scored (need LONG_SOFT_REQUIRED = 2 of 4):
+    #   S1. RSI > 52          — momentum above midpoint (level, not crossover)
+    #   S2. Volume > Baseline — above-median participation
+    #   S3. Close > EMA200    — macro bull trend alignment (bonus)
+    #   S4. Close > EMA50     — local 2-day trend alignment
+    #
+    # If S3 (EMA200) is NOT satisfied → counter-trend trade flagged.
+    # Counter-trend trades use tighter TP and trail targets (see main.py).
 
-    # EMA + Supertrend must both agree; need at least 1 of the 2 soft conditions
-    long_mandatory  = ema_long and supertrend_long
-    long_soft_score = int(rsi_long) + int(volume_long)
-    long_condition  = long_mandatory and long_soft_score >= 1
+    supertrend_long = latest['Supertrend']                        # MANDATORY
+
+    # Soft conditions
+    s1_rsi     = latest['RSI'] > 52                               # momentum level
+    s2_volume  = latest['Volume'] > latest['Volume_Baseline']     # participation
+    s3_ema200  = latest['Close'] > latest['EMA200']               # macro trend
+    s4_ema50   = latest['Close'] > latest['EMA50']                # local trend
+
+    long_soft_score = int(s1_rsi) + int(s2_volume) + int(s3_ema200) + int(s4_ema50)
+    long_condition  = supertrend_long and long_soft_score >= LONG_SOFT_REQUIRED
+    counter_trend   = long_condition and not s3_ema200            # bounce against macro
 
     # --- SHORT ---
-    ema_short        = latest['Close'] < latest['EMA200']         # mandatory
-    supertrend_short = not latest['Supertrend']                   # mandatory
-    rsi_short        = prev['RSI'] >= 50 and latest['RSI'] < 50   # RSI crosses below 50
-    volume_short     = latest['Volume'] > latest['Volume_Baseline'] # busier than median bar
-
-    short_mandatory  = ema_short and supertrend_short
-    short_soft_score = int(rsi_short) + int(volume_short)
-    short_condition  = short_mandatory and short_soft_score >= 1
+    # In LONG_ONLY mode, SHORT signals are suppressed entirely — no short
+    # positions can be opened on a spot account. Set LONG_ONLY=False in
+    # config.py to re-enable shorts (e.g. for margin/futures paper trading).
+    if not LONG_ONLY:
+        ema_short        = latest['Close'] < latest['EMA200']
+        supertrend_short = not latest['Supertrend']
+        rsi_short        = prev['RSI'] >= 50 and latest['RSI'] < 50
+        volume_short     = latest['Volume'] > latest['Volume_Baseline']
+        short_mandatory  = ema_short and supertrend_short
+        short_soft_score = int(rsi_short) + int(volume_short)
+        short_condition  = short_mandatory and short_soft_score >= 1
+    else:
+        short_condition  = False
+        short_soft_score = 0
 
     # ------------------------------------------------------------------
     # Build signal metadata
@@ -201,15 +224,21 @@ def generate_signal(
             "timestamp":         latest.name,
             "close":             latest['Close'],
             "ema200":            latest['EMA200'],
+            "ema50":             latest['EMA50'],
             "rsi":               latest['RSI'],
             "adx":               latest['ADX'],
             "atr":               latest['ATR'],
             "supertrend_lower":  latest['Supertrend_Lower'],
             "supertrend_upper":  latest['Supertrend_Upper'],
-            "soft_confirmations": long_soft_score,   # 1 or 2
+            "soft_confirmations": long_soft_score,   # 1-4
+            "counter_trend":     counter_trend,      # True = bounce against EMA200
+            "s1_rsi":            s1_rsi,
+            "s2_volume":         s2_volume,
+            "s3_ema200":         s3_ema200,
+            "s4_ema50":          s4_ema50,
         }
 
-    if short_condition:
+    if short_condition and not LONG_ONLY:
         return {
             "signal":            "SHORT",
             "timestamp":         latest.name,

@@ -1,13 +1,22 @@
 INITIAL_CAPITAL = 10000
 
 COINS = [
+    # Regime reference — never traded, used only for BTC regime gate
     "BTC/INR",
-    "ETH/INR",
-    "XRP/INR",
-    "BNB/INR",
-    "DOGE/INR",
-    "LINK/INR",
-    "LTC/INR",
+
+    # Tier 2 — low-to-moderate BTC correlation, good CoinDCX volume
+    "ETH/INR",    # corr=0.22 — most independent of BTC on INR markets
+    "XRP/INR",    # corr=0.59 — massive INR volume, moves on own news
+    "ATOM/INR",   # corr=0.48 — Cosmos ecosystem, own narrative
+    "SHIB/INR",   # corr=0.66 — meme dynamics, very high volume
+
+    # Tier 3 — moderate BTC correlation, diverse ecosystems
+    "BNB/INR",    # corr=0.70 — exchange token dynamics
+    "TRX/INR",    # corr=0.73 — Tron ecosystem, excellent volume
+    "SOL/INR",    # corr=0.76 — Solana ecosystem plays
+    "DOT/INR",    # corr=0.75 — Polkadot parachain narrative
+    "AVAX/INR",   # corr=0.77 — Avalanche DeFi ecosystem
+    "UNI/INR",    # corr=0.78 — DeFi token, own protocol narrative
 ]
 
 # ---------------------------------------------------------------------------
@@ -20,7 +29,7 @@ COINS = [
 STOP_LOSS_PCT         = 0.040  # hard stop — catastrophe brake. TIME_EXIT_LOSING
                                # typically fires first at MAX_HOLD_BARS_LOSING.
 MAX_ALLOCATION        = 0.80   # never deploy more than 80% of equity at once
-MAX_POSITIONS_PER_DIR = 3      # allow up to 3 LONGs and 3 SHORTs simultaneously
+MAX_POSITIONS_PER_DIR = 5      # allow up to 5 LONGs simultaneously (10 coins, max 50% in trades)
 TIMEFRAME             = "1h"
 RISK_PER_TRADE        = 0.10
 DATA_DIR              = "data"
@@ -89,3 +98,46 @@ MAX_HOLD_BARS_TRAIL      = 10     # 4C: close trailing half after this many bars
 
 RSI_RESET_SHORT = 45   # after losing SHORT: RSI must drop below this AND still falling
 RSI_RESET_LONG  = 55   # after losing LONG:  RSI must rise above this AND still rising
+# ---------------------------------------------------------------------------
+# Trading mode
+# ---------------------------------------------------------------------------
+# LONG_ONLY = True  → only LONG signals are generated and entered.
+#                     SHORT signals are suppressed entirely. Intended for
+#                     spot trading where selling short is not possible.
+# LONG_ONLY = False → both LONG and SHORT signals are active (default for
+#                     margin/futures paper trading).
+
+LONG_ONLY = True
+
+# When LONG_ONLY is True, the BTC regime gate is relaxed:
+#   - BTC regime SHORT  → LONG entries blocked (market is falling, don't buy)
+#   - BTC regime NEUTRAL → LONG entries ALLOWED (uncertain market, cautious ok)
+#   - BTC regime LONG   → LONG entries allowed (market is rising, ideal)
+#
+# Set to False to use the strict original behaviour (NEUTRAL blocks everything).
+
+REGIME_ALLOWS_LONG_IN_NEUTRAL = True
+
+# ---------------------------------------------------------------------------
+# Counter-trend LONG settings
+# ---------------------------------------------------------------------------
+# When price is BELOW EMA200 (bearish macro) but Supertrend flips bullish
+# locally, the strategy can still enter a LONG — but uses tighter targets
+# since we are trading a bounce against the primary trend, not a full trend.
+#
+# Normal trend LONG  (above EMA200): TP=3.0%, trail=2.0%
+# Counter-trend LONG (below EMA200): TP=1.5%, trail=1.0%
+#
+# The signal scoring system (need 2 of 4 soft conditions) determines whether
+# an entry fires at all. EMA200 is one of the four soft conditions — not a
+# hard gate anymore.
+
+COUNTER_TREND_TP_PCT    = 0.015   # tighter TP for bear-market bounces
+COUNTER_TREND_TRAIL_PCT = 0.010   # tighter trail for bear-market bounces
+
+# Soft condition score threshold for LONG entry.
+# 4 soft conditions scored: RSI>52, Volume>Baseline, Close>EMA200, Close>EMA50
+# Need LONG_SOFT_REQUIRED of 4 to enter.
+# Set to 2 — requires two independent confirmations.
+
+LONG_SOFT_REQUIRED = 2

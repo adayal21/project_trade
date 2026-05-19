@@ -8,9 +8,11 @@ from config import (
     MAX_ALLOCATION, MAX_POSITIONS_PER_DIR,
     PARTIAL_TAKE_PROFIT_PCT, PARTIAL_EXIT_RATIO,
     TRAILING_STOP_PCT,
+    COUNTER_TREND_TP_PCT, COUNTER_TREND_TRAIL_PCT,
     MAX_HOLD_BARS, MAX_HOLD_BARS_LOSING, TIME_EXIT_MIN_MOVE_PCT,
     MAX_HOLD_BARS_EXTENDED, MAX_HOLD_BARS_TRAIL,
     RSI_RESET_SHORT, RSI_RESET_LONG,
+    LONG_ONLY, REGIME_ALLOWS_LONG_IN_NEUTRAL,
 )
 from strategy import apply_indicators, generate_signal
 from portfolio import initialize_portfolio, log_portfolio
@@ -383,6 +385,17 @@ for symbol in COINS:
     latest_price = float(df["Close"].iloc[-1])
     position     = load_position(symbol)
 
+    # Determine effective TP and trail targets.
+    # Counter-trend LONGs (bounces below EMA200) use tighter targets
+    # so we bank profit quickly before the macro trend reasserts.
+    # The flag is stored on the position so exits can reference it.
+    is_counter_trend = (
+        bool(int(position.get('Counter_Trend', 0))) if position is not None
+        else (signal_data.get('counter_trend', False) if signal_data else False)
+    )
+    effective_tp    = COUNTER_TREND_TP_PCT    if is_counter_trend else PARTIAL_TAKE_PROFIT_PCT
+    effective_trail = COUNTER_TREND_TRAIL_PCT if is_counter_trend else TRAILING_STOP_PCT
+
     # ------------------------------------------------------------------
     # [DIAG] Per-coin indicator snapshot — temporary verbose diagnostics
     # ------------------------------------------------------------------
@@ -397,7 +410,17 @@ for symbol in COINS:
           f"ATR_OK={_atr_ratio >= 0.50}")
     print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_Baseline={_row['Volume_Baseline']:.2f}  "
           f"Vol_OK={_row['Volume'] > _row['Volume_Baseline']} (median-based)")
-    print(f"  [DIAG] Signal={signal_dir or 'NONE'}")
+    print(f"  [DIAG] EMA50={_row['EMA50']:.4f}  Close>EMA50={latest_price > _row['EMA50']}")
+    if signal_data:
+        ct = signal_data.get('counter_trend', False)
+        print(f"  [DIAG] Signal={signal_dir}  CounterTrend={ct}  "
+              f"Score={signal_data['soft_confirmations']}/4  "
+              f"(RSI={signal_data.get('s1_rsi',False)} "
+              f"Vol={signal_data.get('s2_volume',False)} "
+              f"EMA200={signal_data.get('s3_ema200',False)} "
+              f"EMA50={signal_data.get('s4_ema50',False)})")
+    else:
+        print(f"  [DIAG] Signal=NONE")
     if signal_data is None and _row["ADX"] < 18.0:
         print(f"  [DIAG] Blocked by: ADX too low ({_row['ADX']:.2f} < 18.0)")
     if signal_data is None and _atr_ratio < 0.50:
@@ -457,7 +480,7 @@ for symbol in COINS:
             else (entry_price - latest_price) / entry_price
         )
 
-        if not already_partial and move_pct >= PARTIAL_TAKE_PROFIT_PCT:
+        if not already_partial and move_pct >= effective_tp:
             exit_qty      = quantity * PARTIAL_EXIT_RATIO
             remain_qty    = quantity - exit_qty
             partial_pnl   = move_pct * entry_price * exit_qty
@@ -513,10 +536,10 @@ for symbol in COINS:
             hwm = float(position.get('Trail_HWM', entry_price))
             if side == "LONG":
                 hwm = max(hwm, latest_price)
-                trail_breach = latest_price < hwm * (1 - TRAILING_STOP_PCT)
+                trail_breach = latest_price < hwm * (1 - effective_trail)
             else:
                 hwm = min(hwm, latest_price)
-                trail_breach = latest_price > hwm * (1 + TRAILING_STOP_PCT)
+                trail_breach = latest_price > hwm * (1 + effective_trail)
 
             # Persist updated HWM each bar
             save_position(symbol, {
@@ -649,7 +672,7 @@ for symbol in COINS:
         # 4B — stuck below partial-profit target (Tier 1 never triggered)
         if not tier4_exit and not already_partial \
                 and bars_held >= MAX_HOLD_BARS_EXTENDED \
-                and 0 < move_pct < PARTIAL_TAKE_PROFIT_PCT:
+                and 0 < move_pct < effective_tp:
             tier4_exit   = True
             tier4_reason = f"TIME_EXIT_STUCK_PROFIT ({bars_held} bars, move={move_pct:.2%})"
 
@@ -711,16 +734,32 @@ for symbol in COINS:
             continue
 
         # Gate 2: BTC regime filter
-        # BTC/INR bypasses this — it is the regime reference itself
+        # BTC/INR bypasses this — it is the regime reference itself.
+        # In LONG_ONLY mode with REGIME_ALLOWS_LONG_IN_NEUTRAL=True:
+        #   - NEUTRAL regime allows LONG entries (uncertain, but not confirmed down)
+        #   - SHORT regime blocks LONG entries (market falling, don't buy)
+        # In normal (non-LONG_ONLY) mode: NEUTRAL blocks everything.
         if symbol != "BTC/INR":
-            if btc_regime is None:
-                print(f"  🚫 BTC regime NEUTRAL — entry blocked.")
-                print()
-                continue
-            if btc_regime != signal_dir:
-                print(f"  🚫 BTC regime mismatch — signal={signal_dir}, BTC={btc_regime}. Blocked.")
-                print()
-                continue
+            if LONG_ONLY:
+                # Only block if regime is a confirmed SHORT — NEUTRAL is fine
+                if btc_regime == "SHORT":
+                    print(f"  🚫 BTC regime SHORT — LONG entry blocked in bear market.")
+                    print()
+                    continue
+                if btc_regime is None and not REGIME_ALLOWS_LONG_IN_NEUTRAL:
+                    print(f"  🚫 BTC regime NEUTRAL — entry blocked (REGIME_ALLOWS_LONG_IN_NEUTRAL=False).")
+                    print()
+                    continue
+            else:
+                # Original strict behaviour: any mismatch or NEUTRAL blocks
+                if btc_regime is None:
+                    print(f"  🚫 BTC regime NEUTRAL — entry blocked.")
+                    print()
+                    continue
+                if btc_regime != signal_dir:
+                    print(f"  🚫 BTC regime mismatch — signal={signal_dir}, BTC={btc_regime}. Blocked.")
+                    print()
+                    continue
 
         # Gate 3: Correlation guard (Tier 3 — now allows up to MAX_POSITIONS_PER_DIR=2)
         dir_counts = dir_counts_cache
@@ -749,6 +788,7 @@ for symbol in COINS:
 
         quantity = allocation / latest_price
 
+        is_ct = signal_data.get('counter_trend', False)
         save_position(symbol, {
             "Coin":          symbol,
             "Side":          signal_dir,
@@ -758,6 +798,7 @@ for symbol in COINS:
             "Partial_Taken": 0,           # Tier 1 not yet fired
             "Trail_HWM":     latest_price, # Tier 2 high-water mark seed
             "Bars_Held":     0,            # Tier 4 counter
+            "Counter_Trend": int(is_ct),  # 1=bounce below EMA200, 0=trend long
         })
 
         cash -= allocation
@@ -765,9 +806,15 @@ for symbol in COINS:
 
         print(f"  ✅ Entered {signal_dir} @ {latest_price:.4f}")
         print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f}")
+        mode_label = "LONG-only" if LONG_ONLY else "LONG+SHORT"
+        ct_label   = " | ⚠️  COUNTER-TREND (tighter exits)" if signal_data.get('counter_trend') else ""
         print(f"     ADX={signal_data['adx']:.1f} | RSI={signal_data['rsi']:.1f} | "
-              f"Confirmations={signal_data['soft_confirmations']}/2 | "
-              f"BTC_Regime={btc_regime}")
+              f"Confirmations={signal_data['soft_confirmations']}/4 | "
+              f"BTC_Regime={btc_regime or 'NEUTRAL'} | Mode={mode_label}{ct_label}")
+        if signal_data.get('counter_trend'):
+            print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (counter-trend targets)")
+        else:
+            print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (trend targets)")
 
     elif signal_dir is None and position is None:
         print(f"  No signal.")
@@ -876,9 +923,12 @@ for symbol in COINS:
         reason       = f"Reversal < {TRAILING_STOP_PCT:.1%}"
         trail_label  = f"{abs(reversal_pct):.1%} from peak" if reversal_pct is not None else "—"
     else:
-        gap_to_tp    = PARTIAL_TAKE_PROFIT_PCT - move_pct
+        _pos_ct      = bool(int(position.get('Counter_Trend', 0)))
+        _eff_tp      = COUNTER_TREND_TP_PCT if _pos_ct else PARTIAL_TAKE_PROFIT_PCT
+        gap_to_tp    = _eff_tp - move_pct
+        ct_tag       = " [CT]" if _pos_ct else ""
         status       = "HOLDING"
-        reason       = f"TP not reached (+{gap_to_tp:.1%} to go)" if move_pct < PARTIAL_TAKE_PROFIT_PCT \
+        reason       = f"TP not reached (+{gap_to_tp:.1%} to go{ct_tag})" if move_pct < _eff_tp \
                        else "TP pending"
         trail_label  = "NOT ACTIVE"
 
