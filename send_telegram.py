@@ -1,8 +1,9 @@
+import os
 import requests
 from pathlib import Path
 
-BOT_TOKEN = "8578606440:AAGrUqdSqNL97jYsoTfd1t72nXGOmXf6hEE"
-CHAT_ID = "5920496287"
+BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 LOG_FILE = Path("logs/live.log")
 

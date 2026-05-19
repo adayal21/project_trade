@@ -67,7 +67,8 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
     Computes all indicators required by the strategy:
       - EMA200          : macro trend filter
       - RSI(14)         : momentum (used for crossover, not raw threshold)
-      - Volume_SMA(20)  : volume baseline
+      - Volume_Baseline : rolling MEDIAN volume (20-bar) — robust to spikes
+                          on thin Indian INR markets
       - ATR(14)         : volatility filter
       - ADX(14)         : regime / chop filter
       - Supertrend      : trend direction + dynamic S/R bands
@@ -80,8 +81,14 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Momentum — keep the raw series; crossover logic lives in generate_signal
     df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
 
-    # Volume baseline
-    df['Volume_SMA'] = df['Volume'].rolling(20).mean()
+    # Volume baseline — rolling MEDIAN (not mean).
+    # Indian INR pairs trade thin: typical bars have low volume punctuated by
+    # occasional whale spikes. A rolling mean gets dragged up by a single spike
+    # and stays inflated for 20 bars, so "Volume > mean" fails on most bars.
+    # Median ignores spikes — "Volume > Volume_Baseline" then genuinely means
+    # "this bar is busier than half the recent bars", which is what the
+    # confirmation was always meant to test.
+    df['Volume_Baseline'] = df['Volume'].rolling(20).median()
 
     # Volatility — ATR for compression detection
     df['ATR'] = AverageTrueRange(
@@ -103,7 +110,7 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # NaN / length guard
 # ---------------------------------------------------------------------------
 
-_REQUIRED_COLUMNS = ['EMA200', 'RSI', 'Volume_SMA', 'ATR', 'ATR_SMA', 'ADX',
+_REQUIRED_COLUMNS = ['EMA200', 'RSI', 'Volume_Baseline', 'ATR', 'ATR_SMA', 'ADX',
                      'Supertrend', 'Supertrend_Upper', 'Supertrend_Lower']
 _MIN_BARS = 200   # driven by EMA200 warm-up
 
@@ -165,8 +172,9 @@ def generate_signal(
     # --- LONG ---
     ema_long        = latest['Close'] > latest['EMA200']          # mandatory
     supertrend_long = latest['Supertrend']                        # mandatory
-    rsi_long = latest['RSI'] > 50                                 # RSI crosses above 50
-    volume_long     = latest['Volume'] > latest['Volume_SMA']     # volume confirms
+    # RSI 50-line crossover (prev bar below/above, current bar above/below)
+    rsi_long  = prev['RSI'] <= 50 and latest['RSI'] > 50
+    volume_long     = latest['Volume'] > latest['Volume_Baseline'] # busier than median bar
 
     # EMA + Supertrend must both agree; need at least 1 of the 2 soft conditions
     long_mandatory  = ema_long and supertrend_long
@@ -176,8 +184,8 @@ def generate_signal(
     # --- SHORT ---
     ema_short        = latest['Close'] < latest['EMA200']         # mandatory
     supertrend_short = not latest['Supertrend']                   # mandatory
-    rsi_short        = latest['RSI'] < 50                         # RSI crosses below 50
-    volume_short     = latest['Volume'] > latest['Volume_SMA']    # volume confirms
+    rsi_short        = prev['RSI'] >= 50 and latest['RSI'] < 50   # RSI crosses below 50
+    volume_short     = latest['Volume'] > latest['Volume_Baseline'] # busier than median bar
 
     short_mandatory  = ema_short and supertrend_short
     short_soft_score = int(rsi_short) + int(volume_short)

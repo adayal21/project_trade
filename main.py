@@ -2,8 +2,6 @@ import os
 import pandas as pd
 import requests
 from datetime import datetime, timedelta, timezone
-from auth import make_signature
-from config import API_KEY, BASE_URL, EXCHANGE
 
 from config import (
     COINS, DATA_DIR, INITIAL_CAPITAL, RISK_PER_TRADE, STOP_LOSS_PCT,
@@ -12,6 +10,7 @@ from config import (
     TRAILING_STOP_PCT,
     MAX_HOLD_BARS, MAX_HOLD_BARS_LOSING, TIME_EXIT_MIN_MOVE_PCT,
     MAX_HOLD_BARS_EXTENDED, MAX_HOLD_BARS_TRAIL,
+    RSI_RESET_SHORT, RSI_RESET_LONG,
 )
 from strategy import apply_indicators, generate_signal
 from portfolio import initialize_portfolio, log_portfolio
@@ -69,6 +68,64 @@ def log_trade(symbol: str, trade: dict) -> None:
     df.to_csv(file, index=False)
 
 
+def get_last_trade(symbol: str) -> dict | None:
+    """Return the most recent FULL-CLOSE trade for this symbol, or None.
+    Partial-profit rows are skipped — they are not failed trades."""
+    file = get_trade_file(symbol)
+    if not os.path.exists(file):
+        return None
+    df = pd.read_csv(file)
+    full_closes = df[df["Exit Reason"] != "PARTIAL_PROFIT"]
+    if full_closes.empty:
+        return None
+    return full_closes.iloc[-1].to_dict()
+
+
+# ---------------------------------------------------------------------------
+# RSI reset check — re-entry filter after losing trades
+# ---------------------------------------------------------------------------
+# After a losing trade, the market must prove momentum genuinely resumed
+# before re-entry in the same direction. Prevents the same weak signal
+# from re-firing immediately after it failed.
+#
+#   Losing SHORT exit → require RSI < RSI_RESET_SHORT (45) AND RSI falling
+#   Losing LONG exit  → require RSI > RSI_RESET_LONG  (55) AND RSI rising
+# ---------------------------------------------------------------------------
+
+def rsi_reset_allows_entry(symbol: str, signal_dir: str, df: pd.DataFrame) -> tuple[bool, str]:
+    last = get_last_trade(symbol)
+    if last is None:
+        return True, ""
+
+    last_side = str(last.get("Side", ""))
+    last_pnl  = float(last.get("PnL", 0))
+
+    # Filter only applies when last full-close was same direction AND a loss
+    if last_side != signal_dir or last_pnl >= 0:
+        return True, ""
+
+    latest_rsi = float(df.iloc[-1]["RSI"])
+    prev_rsi   = float(df.iloc[-2]["RSI"])
+    arrow      = "↓" if latest_rsi < prev_rsi else "↑"
+
+    if signal_dir == "SHORT":
+        if latest_rsi < RSI_RESET_SHORT and latest_rsi < prev_rsi:
+            return True, ""
+        return False, (
+            f"RSI reset required after losing SHORT "
+            f"(need RSI<{RSI_RESET_SHORT} & falling, got RSI={latest_rsi:.1f}{arrow})"
+        )
+
+    if signal_dir == "LONG":
+        if latest_rsi > RSI_RESET_LONG and latest_rsi > prev_rsi:
+            return True, ""
+        return False, (
+            f"RSI reset required after losing LONG "
+            f"(need RSI>{RSI_RESET_LONG} & rising, got RSI={latest_rsi:.1f}{arrow})"
+        )
+    return True, ""
+
+
 # ---------------------------------------------------------------------------
 # Correlation guard — count open positions per direction across all coins
 # ---------------------------------------------------------------------------
@@ -87,147 +144,145 @@ def count_open_by_direction() -> dict:
 # BTC regime filter
 # ---------------------------------------------------------------------------
 
-def get_btc_regime(coins_data: dict) -> str | None:
+def get_btc_regime(coins_data: dict) -> tuple[str | None, dict]:
     """
-    Returns the macro market direction based on BTC's indicators.
+    Returns (regime, breakdown) where regime is 'LONG', 'SHORT', or None.
 
-    Migrated from Coinbase → CoinSwitch: INR-denominated BTC candles are ~2x
-    noisier, which causes EMA200 and Supertrend to disagree constantly on a
-    single bar, producing permanent NEUTRAL under the old binary AND gate.
+    INR-denominated BTC candles are ~2x noisier than the USD pairs the strategy
+    was originally tuned on, which causes EMA200 and Supertrend to disagree
+    constantly on individual bars. A binary AND gate would produce permanent
+    NEUTRAL and block all altcoin entries.
 
-    New approach — 3-indicator majority vote (need 2-of-3 to agree):
+    3-indicator majority vote — REGIME_VOTE_THRESHOLD of 3 must agree:
       1. EMA200     : Close vs EMA200
-      2. Supertrend : bullish / bearish flag
-      3. EMA50/20   : fast EMA above slow EMA (short-term momentum)
-
-    Additionally, Supertrend is confirmed over a 2-bar window to debounce
-    single-candle flips caused by CoinSwitch tick noise.
-
-    'LONG'  → 2 or more indicators bullish
-    'SHORT' → 2 or more indicators bearish
-    None    → split opinion; regime unclear
+      2. Supertrend : confirmed over REGIME_ST_CONFIRM_BARS consecutive bars
+      3. EMA20/50   : fast EMA above slow EMA (short-term momentum)
     """
+    from config import REGIME_ST_CONFIRM_BARS, REGIME_VOTE_THRESHOLD
+
     btc_df = coins_data.get("BTC/INR")
-    if btc_df is None or len(btc_df) < 3:
-        return None
+    if btc_df is None or len(btc_df) < REGIME_ST_CONFIRM_BARS + 1:
+        return None, {}
 
     latest = btc_df.iloc[-1]
-    prev   = btc_df.iloc[-2]
 
     required = ['EMA200', 'Supertrend']
     if any(pd.isna(latest.get(col)) for col in required):
-        return None
+        return None, {}
 
     # --- Indicator 1: EMA200 ---
     ema200_bull = latest['Close'] > latest['EMA200']
     ema200_bear = latest['Close'] < latest['EMA200']
 
-    # --- Indicator 2: Supertrend (2-bar confirmation to debounce noise) ---
-    st_bull = bool(latest['Supertrend']) and bool(prev['Supertrend'])
-    st_bear = (not bool(latest['Supertrend'])) and (not bool(prev['Supertrend']))
+    # --- Indicator 2: Supertrend (REGIME_ST_CONFIRM_BARS confirmation) ---
+    confirm_window = btc_df['Supertrend'].iloc[-REGIME_ST_CONFIRM_BARS:]
+    st_bull = bool(confirm_window.all())
+    st_bear = bool((~confirm_window).all())
 
-    # --- Indicator 3: EMA50 vs EMA20 short-term momentum ---
-    ema20  = btc_df['Close'].ewm(span=20,  adjust=False).mean().iloc[-1]
-    ema50  = btc_df['Close'].ewm(span=50,  adjust=False).mean().iloc[-1]
+    # --- Indicator 3: EMA20 vs EMA50 short-term momentum ---
+    ema20 = btc_df['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50 = btc_df['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     ema_fast_bull = ema20 > ema50
     ema_fast_bear = ema20 < ema50
 
     bull_score = int(ema200_bull) + int(st_bull) + int(ema_fast_bull)
     bear_score = int(ema200_bear) + int(st_bear) + int(ema_fast_bear)
 
-    if bull_score >= 2:
-        return "LONG"
-    if bear_score >= 2:
-        return "SHORT"
+    if bull_score >= REGIME_VOTE_THRESHOLD:
+        regime = "LONG"
+    elif bear_score >= REGIME_VOTE_THRESHOLD:
+        regime = "SHORT"
+    else:
+        regime = None
 
-    return None  # indicators split — no clear regime
+    breakdown = {
+        "close":      latest['Close'],
+        "ema200":     latest['EMA200'],
+        "ema20":      ema20,
+        "ema50":      ema50,
+        "v1_bull":    ema200_bull,   "v1_bear": ema200_bear,
+        "v2_bull":    st_bull,       "v2_bear": st_bear,
+        "v3_bull":    ema_fast_bull, "v3_bear": ema_fast_bear,
+        "bull_score": bull_score,
+        "bear_score": bear_score,
+        "adx":        latest.get('ADX'),
+        "rsi":        latest.get('RSI'),
+        "atr":        latest.get('ATR'),
+        "atr_sma":    latest.get('ATR_SMA'),
+        "st_upper":   latest.get('Supertrend_Upper'),
+        "st_lower":   latest.get('Supertrend_Lower'),
+    }
+
+    return regime, breakdown
 
 
 # ---------------------------------------------------------------------------
-# Data fetching
+# Data fetching — CoinDCX public market data API
 # ---------------------------------------------------------------------------
+# Candles come from CoinDCX's public endpoint (no auth required).
+# Volume is reported in target currency (e.g. BTC for BTC/INR), with proper
+# density on Indian INR markets. Same venue used for paper trading P&L
+# simulation and (eventually) live execution.
+
+
+def _coindcx_pair(symbol: str) -> str:
+    """Map 'BTC/INR' → 'I-BTC_INR' (CoinDCX pair format)."""
+    target, base = symbol.split("/")
+    return f"I-{target}_{base}"
+
 
 def fetch_data(symbol: str) -> pd.DataFrame:
+    """Fetch 1h candles from CoinDCX's public market data API.
+    Returns an empty DataFrame on failure — caller must handle that."""
+    pair = _coindcx_pair(symbol)
+    url = "https://public.coindcx.com/market_data/candles"
+    params = {"pair": pair, "interval": "1h", "limit": 1000}  # ~41 days at 1h
 
-    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    start_ms = end_ms - (20 * 24 * 60 * 60 * 1000)
-
-    endpoint = "/trade/api/v2/candles"
-
-    params = {
-        "exchange": EXCHANGE,
-        "symbol": symbol,
-        "interval": "60",
-        "start_time": str(start_ms),
-        "end_time": str(end_ms),
-    }
-
-    endpoint, epoch_time, signature = make_signature(
-        "GET",
-        endpoint,
-        params
-    )
-
-    url = BASE_URL + endpoint
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-AUTH-APIKEY": API_KEY,
-        "X-AUTH-SIGNATURE": signature,
-        "X-AUTH-EPOCH": epoch_time,
-    }
-
-    response = requests.get(
-        url,
-        headers=headers,
-        timeout=10
-    )
-
-    # print(f"  URL: {url}")
-    # print(f"  HTTP Status: {response.status_code}")
-
-    try:
-        data = response.json()
-    except Exception as e:
-        print(f"  JSON parse failed: {e}")
+    last_exc = None
+    for attempt in range(1, 4):
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            break
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            if attempt < 3:
+                import time as _time
+                print(f"  CoinDCX request failed (attempt {attempt}/3): {e}. Retrying...")
+                _time.sleep(2 ** attempt)
+    else:
+        print(f"  CoinDCX all retries failed: {last_exc}")
         return pd.DataFrame()
 
     if response.status_code != 200:
-        print(f"  CoinSwitch error: {data}")
+        print(f"  CoinDCX error {response.status_code}: {response.text[:200]}")
         return pd.DataFrame()
 
-    candles = data["data"]
+    try:
+        candles = response.json()
+    except Exception as e:
+        print(f"  CoinDCX JSON parse failed: {e}")
+        return pd.DataFrame()
 
-    if len(candles) == 0:
-        print(f"  Empty candles for {symbol}")
+    if not isinstance(candles, list) or len(candles) == 0:
+        print(f"  CoinDCX empty candles for {pair}")
         return pd.DataFrame()
 
     df = pd.DataFrame(candles)
-
     df.rename(columns={
-        "o": "Open",
-        "h": "High",
-        "l": "Low",
-        "c": "Close",
+        "open":   "Open",
+        "high":   "High",
+        "low":    "Low",
+        "close":  "Close",
         "volume": "Volume",
-        "start_time": "time"
+        "time":   "time",
     }, inplace=True)
 
-    df["time"] = pd.to_datetime(
-        pd.to_numeric(df["time"]),
-        unit="ms"
-    )
-
-    numeric_cols = ["Open", "High", "Low", "Close", "Volume"]
-
-    for col in numeric_cols:
+    df["time"] = pd.to_datetime(pd.to_numeric(df["time"]), unit="ms")
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
         df[col] = pd.to_numeric(df[col])
 
-    df = df.sort_values("time")
-
+    df = df.sort_values("time")   # CoinDCX returns descending; we want ascending
     df.set_index("time", inplace=True)
-
     return df
 
 
@@ -275,55 +330,45 @@ coins_data = {}
 for symbol in COINS:
     print(f"\nFetching {symbol}")
     df = fetch_data(symbol)
-    if len(df) < 200:   # lowered from 250: CoinSwitch returns ~480 bars per 20-day window
+    if len(df) < 200:   # EMA200 needs 200 bars of warm-up
         print(f"  Not enough data ({len(df)} bars), skipping.")
         continue
     coins_data[symbol] = apply_indicators(df)
+    # Raw volume distribution — sanity-check the data feed.
+    v = df['Volume']
+    print(f"  [VOL DIAG] {symbol}: min={v.min():.4f}  median={v.median():.4f}  "
+          f"max={v.max():.4f}  last={v.iloc[-1]:.4f}")
 
 # ------------------------------------------------------------------
 # Step 2: Determine BTC regime — single gate for all altcoin entries.
 # ------------------------------------------------------------------
 
-btc_regime = get_btc_regime(coins_data)
+btc_regime, btc_breakdown = get_btc_regime(coins_data)
 print(f"\n{'=' * 50}")
 print(f"BTC Regime : {btc_regime or 'NEUTRAL (mixed — altcoin entries blocked)'}")
 print(f"{'=' * 50}")
 
-# ------------------------------------------------------------------
-# [DIAG] BTC regime vote breakdown — temporary verbose diagnostics
-# Remove this block once CoinSwitch behaviour is validated.
-# ------------------------------------------------------------------
-btc_df = coins_data.get("BTC/INR")
-if btc_df is not None and len(btc_df) >= 3:
-    _latest = btc_df.iloc[-1]
-    _prev   = btc_df.iloc[-2]
-    _ema20  = btc_df["Close"].ewm(span=20, adjust=False).mean().iloc[-1]
-    _ema50  = btc_df["Close"].ewm(span=50, adjust=False).mean().iloc[-1]
-
-    _v1_bull = _latest["Close"] > _latest["EMA200"]
-    _v2_bull = bool(_latest["Supertrend"]) and bool(_prev["Supertrend"])
-    _v3_bull = _ema20 > _ema50
-
-    _v1_bear = _latest["Close"] < _latest["EMA200"]
-    _v2_bear = (not bool(_latest["Supertrend"])) and (not bool(_prev["Supertrend"]))
-    _v3_bear = _ema20 < _ema50
-
-    _bull_score = int(_v1_bull) + int(_v2_bull) + int(_v3_bull)
-    _bear_score = int(_v1_bear) + int(_v2_bear) + int(_v3_bear)
-
+if btc_breakdown:
+    bd = btc_breakdown
     print(f"[DIAG] BTC/INR Regime Votes:")
-    print(f"  Close       : {_latest['Close']:.2f}")
-    print(f"  EMA200      : {_latest['EMA200']:.2f}  ->  Vote1 BULL={_v1_bull} BEAR={_v1_bear}")
-    print(f"  Supertrend  : now={bool(_latest['Supertrend'])} prev={bool(_prev['Supertrend'])}  ->  Vote2 BULL={_v2_bull} BEAR={_v2_bear}")
-    print(f"  EMA20/EMA50 : {_ema20:.2f} / {_ema50:.2f}  ->  Vote3 BULL={_v3_bull} BEAR={_v3_bear}")
-    print(f"  Bull Score  : {_bull_score}/3  |  Bear Score : {_bear_score}/3  ->  Regime={btc_regime or 'NEUTRAL'}")
-    print(f"  ADX         : {_latest['ADX']:.2f}  |  RSI={_latest['RSI']:.2f}  |  ATR={_latest['ATR']:.2f}  |  ATR_SMA={_latest['ATR_SMA']:.2f}")
-    print(f"  ST_Upper    : {_latest['Supertrend_Upper']:.2f}  |  ST_Lower={_latest['Supertrend_Lower']:.2f}")
+    print(f"  Close       : {bd['close']:.2f}")
+    print(f"  EMA200      : {bd['ema200']:.2f}  ->  Vote1 BULL={bd['v1_bull']} BEAR={bd['v1_bear']}")
+    print(f"  Supertrend  : confirmed  ->  Vote2 BULL={bd['v2_bull']} BEAR={bd['v2_bear']}")
+    print(f"  EMA20/EMA50 : {bd['ema20']:.2f} / {bd['ema50']:.2f}  ->  Vote3 BULL={bd['v3_bull']} BEAR={bd['v3_bear']}")
+    print(f"  Bull Score  : {bd['bull_score']}/3  |  Bear Score : {bd['bear_score']}/3  ->  Regime={btc_regime or 'NEUTRAL'}")
+    print(f"  ADX         : {bd['adx']:.2f}  |  RSI={bd['rsi']:.2f}  |  ATR={bd['atr']:.2f}  |  ATR_SMA={bd['atr_sma']:.2f}")
+    print(f"  ST_Upper    : {bd['st_upper']:.2f}  |  ST_Lower={bd['st_lower']:.2f}")
 print()
 
 # ------------------------------------------------------------------
 # Step 3: Process each coin.
+# Cache open-position direction counts once — avoids O(N²) disk reads
+# (count_open_by_direction reads every coin's position file; calling it
+# inside the per-coin loop would re-read N files for each of N coins).
+# Refreshed after any trade that opens or closes a position.
 # ------------------------------------------------------------------
+
+dir_counts_cache = count_open_by_direction()
 
 for symbol in COINS:
     print(f"--- {symbol} ---")
@@ -350,8 +395,8 @@ for symbol in COINS:
     print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
           f"Ratio={_atr_ratio:.2f}(thr=0.50)  "
           f"ATR_OK={_atr_ratio >= 0.50}")
-    print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_SMA={_row['Volume_SMA']:.2f}  "
-          f"Vol_OK={_row['Volume'] > _row['Volume_SMA']}")
+    print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_Baseline={_row['Volume_Baseline']:.2f}  "
+          f"Vol_OK={_row['Volume'] > _row['Volume_Baseline']} (median-based)")
     print(f"  [DIAG] Signal={signal_dir or 'NONE'}")
     if signal_data is None and _row["ADX"] < 18.0:
         print(f"  [DIAG] Blocked by: ADX too low ({_row['ADX']:.2f} < 18.0)")
@@ -393,6 +438,7 @@ for symbol in COINS:
             })
 
             clear_position(symbol)
+            dir_counts_cache = count_open_by_direction()  # refresh after close
             position = None
 
     # -------------------------------------------------------------------
@@ -512,6 +558,7 @@ for symbol in COINS:
                 })
 
                 clear_position(symbol)
+                dir_counts_cache = count_open_by_direction()  # refresh after close
                 position = None
 
     # -------------------------------------------------------------------
@@ -550,6 +597,7 @@ for symbol in COINS:
             })
 
             clear_position(symbol)
+            dir_counts_cache = count_open_by_direction()  # refresh after close
             position = None
 
     # -------------------------------------------------------------------
@@ -632,6 +680,7 @@ for symbol in COINS:
             })
 
             clear_position(symbol)
+            dir_counts_cache = count_open_by_direction()  # refresh after close
             position = None
         else:
             # Not exiting yet — persist updated bars_held counter
@@ -653,6 +702,14 @@ for symbol in COINS:
 
         # Gate 1 (implicit): position is None — coin is flat ✓
 
+        # Gate 1.5: RSI reset filter — blocks re-entry after a losing trade
+        # until RSI has materially reset in the signal direction.
+        rsi_ok, rsi_block_reason = rsi_reset_allows_entry(symbol, signal_dir, df)
+        if not rsi_ok:
+            print(f"  🚫 RSI reset: {rsi_block_reason}")
+            print()
+            continue
+
         # Gate 2: BTC regime filter
         # BTC/INR bypasses this — it is the regime reference itself
         if symbol != "BTC/INR":
@@ -666,7 +723,7 @@ for symbol in COINS:
                 continue
 
         # Gate 3: Correlation guard (Tier 3 — now allows up to MAX_POSITIONS_PER_DIR=2)
-        dir_counts = count_open_by_direction()
+        dir_counts = dir_counts_cache
         if dir_counts[signal_dir] >= MAX_POSITIONS_PER_DIR:
             print(f"  🚫 Correlation guard — already {dir_counts[signal_dir]} "
                   f"{signal_dir}(s) open (max={MAX_POSITIONS_PER_DIR}). Blocked.")
@@ -675,8 +732,14 @@ for symbol in COINS:
 
         # Capital guard
         allocation = cash * RISK_PER_TRADE
-        if allocation > cash * MAX_ALLOCATION:
-            print(f"  🚫 Capital guard — ₹{allocation:.2f} exceeds safe limit.")
+        total_capital = cash + sum(
+            float(load_position(s)['Entry Price']) * float(load_position(s)['Quantity'])
+            for s in COINS
+            if load_position(s) is not None
+        )
+        deployed = total_capital - cash
+        if deployed / total_capital >= MAX_ALLOCATION:
+            print(f"  🚫 Capital guard — {deployed/total_capital:.0%} deployed exceeds MAX_ALLOCATION={MAX_ALLOCATION:.0%}.")
             print()
             continue
         if allocation <= 0:
@@ -698,6 +761,7 @@ for symbol in COINS:
         })
 
         cash -= allocation
+        dir_counts_cache = count_open_by_direction()  # refresh after open
 
         print(f"  ✅ Entered {signal_dir} @ {latest_price:.4f}")
         print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f}")
