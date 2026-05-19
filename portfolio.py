@@ -36,12 +36,12 @@ def log_portfolio(
     df = pd.read_csv(portfolio_file)
 
     new_row = {
-        "Timestamp": datetime.now(),
-        "Cash": cash,
-        "Equity": equity,
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Cash": round(cash, 2),
+        "Equity": round(equity, 2),
         "Open Positions": open_positions,
-        "Realized PnL": realized_pnl,
-        "Unrealized PnL": unrealized_pnl,
+        "Realized PnL": round(realized_pnl, 2),
+        "Unrealized PnL": round(unrealized_pnl, 2),
         "Total Trades": total_trades
     }
 
