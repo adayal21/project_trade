@@ -10,13 +10,14 @@ from config import (
     PARTIAL_TAKE_PROFIT_PCT, PARTIAL_EXIT_RATIO,
     TRAILING_STOP_PCT,
     COUNTER_TREND_TP_PCT, COUNTER_TREND_TRAIL_PCT,
-    MAX_HOLD_BARS, MAX_HOLD_BARS_LOSING, TIME_EXIT_MIN_MOVE_PCT,
-    MAX_HOLD_BARS_EXTENDED, MAX_HOLD_BARS_TRAIL,
+    TIME_EXIT_STAGNANT_HOURS, TIME_EXIT_LOSING_HOURS, TIME_EXIT_MIN_MOVE_PCT,
+    TIME_EXIT_EXTENDED_HOURS, TIME_EXIT_TRAIL_HOURS,
     RSI_RESET_SHORT, RSI_RESET_LONG,
     LONG_ONLY, REGIME_ALLOWS_LONG_IN_NEUTRAL, REGIME_OVERRIDE_MIN_SCORE,
-    CONFIRM_15MIN,
+    CONFIRM_15MIN, USE_4H_REGIME, CT_EXIT_15MIN, VERBOSE_DIAG,
 )
-from strategy import apply_indicators, generate_signal, confirm_15min_momentum
+from strategy import (apply_indicators, generate_signal,
+                      confirm_15min_momentum, get_4h_direction, check_15min_ct_exit)
 from portfolio import initialize_portfolio, log_portfolio
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -371,8 +372,9 @@ for symbol in COINS:
     coins_data[symbol] = apply_indicators(df)
     # Raw volume distribution — sanity-check the data feed.
     v = df['Volume']
-    print(f"  [VOL DIAG] {symbol}: min={v.min():.4f}  median={v.median():.4f}  "
-          f"max={v.max():.4f}  last={v.iloc[-1]:.4f}")
+    if VERBOSE_DIAG:
+        print(f"  [VOL DIAG] {symbol}: min={v.min():.4f}  median={v.median():.4f}  "
+              f"max={v.max():.4f}  last={v.iloc[-1]:.4f}")
 
 # ------------------------------------------------------------------
 # Step 2: Determine BTC regime — single gate for all altcoin entries.
@@ -383,7 +385,7 @@ print(f"\n{'=' * 50}")
 print(f"BTC Regime : {btc_regime or 'NEUTRAL (mixed — altcoin entries blocked)'}")
 print(f"{'=' * 50}")
 
-if btc_breakdown:
+if VERBOSE_DIAG and btc_breakdown:
     bd = btc_breakdown
     print(f"[DIAG] BTC/INR Regime Votes:")
     print(f"  Close       : {bd['close']:.2f}")
@@ -434,42 +436,54 @@ for symbol in COINS:
     # Counter-trend LONGs (bounces below EMA200) use tighter targets
     # so we bank profit quickly before the macro trend reasserts.
     # The flag is stored on the position so exits can reference it.
+    # Counter-trend: 1H EMA200 not satisfied OR 4H is bearish
+    _sig_ct = signal_data.get('counter_trend', False) if signal_data else False
+    if USE_4H_REGIME and symbol != "BTC/INR":
+        _4h_dir, _4h_reason = get_4h_direction(symbol)
+        _4h_ct = (_4h_dir == "BEAR")
+    else:
+        _4h_dir, _4h_reason = "N/A", ""
+        _4h_ct = False
+
     is_counter_trend = (
         bool(int(position.get('Counter_Trend', 0))) if position is not None
-        else (signal_data.get('counter_trend', False) if signal_data else False)
+        else (_sig_ct or _4h_ct)
     )
     effective_tp    = COUNTER_TREND_TP_PCT    if is_counter_trend else PARTIAL_TAKE_PROFIT_PCT
     effective_trail = COUNTER_TREND_TRAIL_PCT if is_counter_trend else TRAILING_STOP_PCT
 
     # ------------------------------------------------------------------
-    # [DIAG] Per-coin indicator snapshot — temporary verbose diagnostics
+    # [DIAG] Per-coin indicator snapshot — only printed when VERBOSE_DIAG=True
     # ------------------------------------------------------------------
     _row = df.iloc[-1]
     _atr_ratio = (_row["ATR"] / _row["ATR_SMA"]) if _row["ATR_SMA"] > 0 else 0
-    print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}  "
-          f"Close>EMA200={latest_price > _row['EMA200']}")
-    print(f"  [DIAG] RSI={_row['RSI']:.2f}  ADX={_row['ADX']:.2f}(thr=18)  "
-          f"Supertrend={'BULL' if _row['Supertrend'] else 'BEAR'}")
-    print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
-          f"Ratio={_atr_ratio:.2f}(thr=0.50)  "
-          f"ATR_OK={_atr_ratio >= 0.50}")
-    print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_Baseline={_row['Volume_Baseline']:.2f}  "
-          f"Vol_OK={_row['Volume'] > _row['Volume_Baseline']} (median-based)")
-    print(f"  [DIAG] EMA50={_row['EMA50']:.4f}  Close>EMA50={latest_price > _row['EMA50']}")
-    if signal_data:
-        ct = signal_data.get('counter_trend', False)
-        print(f"  [DIAG] Signal={signal_dir}  CounterTrend={ct}  "
-              f"Score={signal_data['soft_confirmations']}/4  "
-              f"(RSI={signal_data.get('s1_rsi',False)} "
-              f"Vol={signal_data.get('s2_volume',False)} "
-              f"EMA200={signal_data.get('s3_ema200',False)} "
-              f"EMA50={signal_data.get('s4_ema50',False)})")
-    else:
-        print(f"  [DIAG] Signal=NONE")
-    if signal_data is None and _row["ADX"] < 18.0:
-        print(f"  [DIAG] Blocked by: ADX too low ({_row['ADX']:.2f} < 18.0)")
-    if signal_data is None and _atr_ratio < 0.50:
-        print(f"  [DIAG] Blocked by: ATR compression ({_atr_ratio:.2f} < 0.50)")
+    if VERBOSE_DIAG:
+        print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}  "
+              f"Close>EMA200={latest_price > _row['EMA200']}")
+        print(f"  [DIAG] RSI={_row['RSI']:.2f}  ADX={_row['ADX']:.2f}(thr=18)  "
+              f"Supertrend={'BULL' if _row['Supertrend'] else 'BEAR'}")
+        print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
+              f"Ratio={_atr_ratio:.2f}(thr=0.50)  "
+              f"ATR_OK={_atr_ratio >= 0.50}")
+        print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_Baseline={_row['Volume_Baseline']:.2f}  "
+              f"Vol_OK={_row['Volume'] > _row['Volume_Baseline']} (median-based)")
+        print(f"  [DIAG] EMA50={_row['EMA50']:.4f}  Close>EMA50={latest_price > _row['EMA50']}")
+        if _4h_dir != "N/A":
+            print(f"  [DIAG] 4H={_4h_dir}  {_4h_reason}")
+        if signal_data:
+            ct = signal_data.get('counter_trend', False)
+            print(f"  [DIAG] Signal={signal_dir}  CounterTrend={ct}  "
+                  f"Score={signal_data['soft_confirmations']}/4  "
+                  f"(RSI={signal_data.get('s1_rsi',False)} "
+                  f"Vol={signal_data.get('s2_volume',False)} "
+                  f"EMA200={signal_data.get('s3_ema200',False)} "
+                  f"EMA50={signal_data.get('s4_ema50',False)})")
+        else:
+            print(f"  [DIAG] Signal=NONE")
+        if signal_data is None and _row["ADX"] < 18.0:
+            print(f"  [DIAG] Blocked by: ADX too low ({_row['ADX']:.2f} < 18.0)")
+        if signal_data is None and _atr_ratio < 0.50:
+            print(f"  [DIAG] Blocked by: ATR compression ({_atr_ratio:.2f} < 0.50)")
 
     # -------------------------------------------------------------------
     # Stop-loss — always checked first, no gate bypasses this
@@ -684,62 +698,102 @@ for symbol in COINS:
             position = None
 
     # -------------------------------------------------------------------
-    # Tier 4 — Time-based exit backstop (three sub-cases)
+    # -------------------------------------------------------------------
+    # Tier 0 (new) — Counter-trend 15-min early exit
+    # -------------------------------------------------------------------
+    # For counter-trend LONGs only: monitor every 15-min run whether the
+    # bounce is reversing. If CT_EXIT_CONSEC_BARS consecutive 15-min bars
+    # are falling → exit before the reversal eats into the 1.5% target.
+    # Normal trend LONGs skip this check entirely.
+    # -------------------------------------------------------------------
+    if position is not None and CT_EXIT_15MIN:
+        pos_is_ct = bool(int(position.get('Counter_Trend', 0)))
+        if pos_is_ct:
+            ct_should_exit, ct_reason = check_15min_ct_exit(symbol)
+            if VERBOSE_DIAG:
+                print(f"  [CT-monitor] {ct_reason}")
+            if ct_should_exit:
+                side        = position['Side']
+                entry_price = float(position['Entry Price'])
+                quantity    = float(position['Quantity'])
+                move_pct    = (latest_price - entry_price) / entry_price if side == "LONG"                               else (entry_price - latest_price) / entry_price
+                pnl = move_pct * entry_price * quantity
+
+                realized_pnl    += pnl
+                total_trades    += 1
+                trades_this_run += 1
+                cash            += entry_price * quantity + pnl
+
+                print(f"  ⚡ CT EARLY EXIT — bounce reversing | PnL: {pnl:.2f}")
+                log_trade(symbol, {
+                    "Coin":        symbol,
+                    "Side":        side,
+                    "Entry Price": entry_price,
+                    "Exit Price":  latest_price,
+                    "Quantity":    quantity,
+                    "PnL":         round(pnl, 4),
+                    "Exit Reason": "CT_15MIN_REVERSAL",
+                    "Exit Time":   datetime.now(timezone.utc)
+                })
+                if TRADING_MODE == "live":
+                    from exchange import place_market_order
+                    place_market_order(symbol, "sell", quantity)
+                clear_position(symbol)
+                dir_counts_cache = count_open_by_direction()
+                position = None
+
+    # -------------------------------------------------------------------
+    # Tier 4 — Time-based exit backstop (HOUR-based, timeframe-agnostic)
+    # -------------------------------------------------------------------
+    # Uses hours since entry (from Timestamp) not bar count.
+    # This means exits are correct whether cron runs every 15-min or 1h.
     #
-    #   4A  Stagnant          : bars >= MAX_HOLD_BARS  AND |move| < 0.5%
-    #                           → price has gone nowhere; cut and free capital
-    #
-    #   4B  Stuck-profitable  : bars >= MAX_HOLD_BARS_EXTENDED AND 0 < move < +2%
-    #                           (Tier 1 never fired) → take the small gain rather
-    #                           than waiting forever for a target that may never come
-    #
-    #   4C  Trailing timeout  : Tier 1 already fired AND bars >= MAX_HOLD_BARS_TRAIL
-    #                           → remaining half has drifted long enough; exit it
-    #
-    # Bars_Held is incremented every run and persisted in the position file.
+    #   4A  Stagnant : hours_held >= TIME_EXIT_STAGNANT_HOURS  AND |move| < 0.5%
+    #   4D  Losing   : hours_held >= TIME_EXIT_LOSING_HOURS    AND move < 0%
+    #   4B  Stuck+   : hours_held >= TIME_EXIT_EXTENDED_HOURS  AND 0 < move < TP
+    #   4C  Trail TO : Tier 1 fired AND hours_held >= TIME_EXIT_TRAIL_HOURS
     # -------------------------------------------------------------------
     if position is not None:
         side            = position['Side']
         entry_price     = float(position['Entry Price'])
         quantity        = float(position['Quantity'])
         already_partial = bool(int(position.get('Partial_Taken', 0)))
-        bars_held       = int(position.get('Bars_Held', 0)) + 1  # increment this run
+
+        # Hour-based elapsed time
+        try:
+            entry_ts  = pd.Timestamp(position['Timestamp']).tz_convert('UTC')
+            now_ts    = datetime.now(timezone.utc)
+            hours_held = (now_ts - entry_ts.to_pydatetime()).total_seconds() / 3600
+        except Exception:
+            hours_held = float(position.get('Bars_Held', 0))  # fallback
 
         move_pct = (
             (latest_price - entry_price) / entry_price if side == "LONG"
             else (entry_price - latest_price) / entry_price
         )
 
-        tier4_exit    = False
-        tier4_reason  = ""
+        tier4_exit   = False
+        tier4_reason = ""
 
-        # 4A — truly stagnant: held long enough with no meaningful move either way
-        if not tier4_exit and bars_held >= MAX_HOLD_BARS and abs(move_pct) < TIME_EXIT_MIN_MOVE_PCT:
+        # 4A — stagnant: no meaningful move after TIME_EXIT_STAGNANT_HOURS
+        if not tier4_exit and hours_held >= TIME_EXIT_STAGNANT_HOURS                 and abs(move_pct) < TIME_EXIT_MIN_MOVE_PCT:
             tier4_exit   = True
-            tier4_reason = f"TIME_EXIT_STAGNANT ({bars_held} bars, move={move_pct:.2%})"
+            tier4_reason = f"TIME_EXIT_STAGNANT ({hours_held:.1f}h, move={move_pct:.2%})"
 
-        # 4D — losing position timeout: signal thesis failed, cut before stop-loss
-        # Fires after just MAX_HOLD_BARS_LOSING (3h) of continuous loss — no point
-        # waiting 6 bars when the trade has been underwater since entry.
-        # Only fires when Tier 1 hasn't triggered — once partial profit was taken
-        # the trade was validated; let trailing stop manage the remainder instead.
-        if not tier4_exit and not already_partial \
-                and bars_held >= MAX_HOLD_BARS_LOSING \
-                and move_pct < 0:
+        # 4D — losing: thesis failed, cut early
+        if not tier4_exit and not already_partial                 and hours_held >= TIME_EXIT_LOSING_HOURS                 and move_pct < 0:
             tier4_exit   = True
-            tier4_reason = f"TIME_EXIT_LOSING ({bars_held} bars, move={move_pct:.2%})"
+            tier4_reason = f"TIME_EXIT_LOSING ({hours_held:.1f}h, move={move_pct:.2%})"
 
-        # 4B — stuck below partial-profit target (Tier 1 never triggered)
-        if not tier4_exit and not already_partial \
-                and bars_held >= MAX_HOLD_BARS_EXTENDED \
-                and 0 < move_pct < effective_tp:
+        # 4B — stuck profitable: Tier 1 never fired, take small gain
+        if not tier4_exit and not already_partial                 and hours_held >= TIME_EXIT_EXTENDED_HOURS                 and 0 < move_pct < effective_tp:
             tier4_exit   = True
-            tier4_reason = f"TIME_EXIT_STUCK_PROFIT ({bars_held} bars, move={move_pct:.2%})"
+            tier4_reason = f"TIME_EXIT_STUCK_PROFIT ({hours_held:.1f}h, move={move_pct:.2%})"
 
-        # 4C — trailing half timeout (Tier 1 already fired)
-        if not tier4_exit and already_partial and bars_held >= MAX_HOLD_BARS_TRAIL:
+        # 4C — trailing half timeout
+        if not tier4_exit and already_partial                 and hours_held >= TIME_EXIT_TRAIL_HOURS:
             tier4_exit   = True
-            tier4_reason = f"TIME_EXIT_TRAIL_TIMEOUT ({bars_held} bars)"
+            tier4_reason = f"TIME_EXIT_TRAIL_TIMEOUT ({hours_held:.1f}h)"
 
         if tier4_exit:
             pnl = move_pct * entry_price * quantity
@@ -758,7 +812,7 @@ for symbol in COINS:
                 "Exit Price":  latest_price,
                 "Quantity":    quantity,
                 "PnL":         round(pnl, 4),
-                "Exit Reason": tier4_reason.split(" (")[0],   # clean label for CSV
+                "Exit Reason": tier4_reason.split(" (")[0],
                 "Exit Time":   datetime.now(timezone.utc)
             })
 
@@ -766,10 +820,11 @@ for symbol in COINS:
                 from exchange import place_market_order
                 place_market_order(symbol, "sell", quantity)
             clear_position(symbol)
-            dir_counts_cache = count_open_by_direction()  # refresh after close
+            dir_counts_cache = count_open_by_direction()
             position = None
         else:
-            # Not exiting yet — persist updated bars_held counter
+            # Persist position — keep Bars_Held for display purposes only
+            bars_held = int(position.get('Bars_Held', 0)) + 1
             save_position(symbol, {
                 "Coin":          symbol,
                 "Side":          side,
@@ -779,6 +834,7 @@ for symbol in COINS:
                 "Partial_Taken": int(position.get('Partial_Taken', 0)),
                 "Trail_HWM":     float(position.get('Trail_HWM', entry_price)),
                 "Bars_Held":     bars_held,
+                "Counter_Trend": int(position.get('Counter_Trend', 0)),
             })
 
     # -------------------------------------------------------------------
@@ -803,7 +859,7 @@ for symbol in COINS:
             if LONG_ONLY:
                 if btc_regime == "SHORT":
                     coin_score      = signal_data.get('soft_confirmations', 0)
-                    is_ct           = signal_data.get('counter_trend', True)
+                    is_ct           = signal_data.get('counter_trend', True) or _4h_ct
                     regime_override = coin_score >= REGIME_OVERRIDE_MIN_SCORE and not is_ct
                     if regime_override:
                         print(f"  ⚡ BTC regime SHORT overridden — "
@@ -916,7 +972,8 @@ if entry_candidates:
         # already peaked before our entry bar.
         if CONFIRM_15MIN:
             mom_ok, mom_reason = confirm_15min_momentum(symbol, signal_dir)
-            print(f"  [15min] {mom_reason}")
+            if VERBOSE_DIAG or not mom_ok:
+                print(f"  [15min] {mom_reason}")
             if not mom_ok:
                 print(f"  🚫 Entry skipped — 15-min momentum check failed.")
                 print()

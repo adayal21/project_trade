@@ -135,21 +135,21 @@ TRAILING_STOP_PCT       = 0.020   # trail 2% below the high-water mark price
                                    # only activates after Tier 1 partial exit fires
 
 # ---------------------------------------------------------------------------
-# Tier 4 — Time-based exit backstop
+# Tier 4 — Time-based exit backstop (HOUR-based, not bar-based)
 # ---------------------------------------------------------------------------
-# 4A  Stagnant : bars >= MAX_HOLD_BARS         AND |move| < 0.5%   → no movement, cut it
-# 4D  Losing   : bars >= MAX_HOLD_BARS_LOSING  AND move < 0%       → thesis failed, cut early
-#                4 bars = 4h of continuous loss on 1h timeframe; gives one extra
-#                bar of patience for temporary dips before cutting
-#                (fires before the hard stop-loss; only when Tier 1 hasn't fired)
-# 4B  Stuck+   : bars >= MAX_HOLD_BARS_EXTENDED AND 0 < move < +2% → take small gain
-# 4C  Trail TO : Tier 1 fired AND bars >= MAX_HOLD_BARS_TRAIL      → exit remaining half
+# Using hours instead of bars makes exits timeframe-agnostic — correct
+# whether the cron runs every 15 minutes or every hour.
+#
+# 4A  Stagnant : hours_held >= TIME_EXIT_STAGNANT_HOURS  AND |move| < 0.5%
+# 4D  Losing   : hours_held >= TIME_EXIT_LOSING_HOURS    AND move < 0%
+# 4B  Stuck+   : hours_held >= TIME_EXIT_EXTENDED_HOURS  AND 0 < move < TP
+# 4C  Trail TO : Tier 1 fired AND hours_held >= TIME_EXIT_TRAIL_HOURS
 
-MAX_HOLD_BARS            = 6      # bars before 4A (stagnant) time exit is eligible
-MAX_HOLD_BARS_LOSING     = 4      # bars before 4D (losing) time exit fires
-TIME_EXIT_MIN_MOVE_PCT   = 0.005  # 4A threshold: |move| < 0.5% = stagnant
-MAX_HOLD_BARS_EXTENDED   = 12     # 4B: exit stuck-profitable positions after this many bars
-MAX_HOLD_BARS_TRAIL      = 10     # 4C: close trailing half after this many bars post Tier 1
+TIME_EXIT_STAGNANT_HOURS  = 6    # 4A: cut stagnant position after 6h
+TIME_EXIT_LOSING_HOURS    = 4    # 4D: cut losing position after 4h
+TIME_EXIT_MIN_MOVE_PCT    = 0.005 # 4A threshold: |move| < 0.5% = stagnant
+TIME_EXIT_EXTENDED_HOURS  = 12   # 4B: exit stuck-profitable after 12h
+TIME_EXIT_TRAIL_HOURS     = 10   # 4C: close trailing half 10h after Tier 1
 
 # ---------------------------------------------------------------------------
 # RSI reset thresholds — re-entry filter after losing trades
@@ -222,13 +222,38 @@ LONG_SOFT_REQUIRED = 2
 
 REGIME_OVERRIDE_MIN_SCORE = 3
 # ---------------------------------------------------------------------------
-# 15-minute momentum confirmation gate
+# Multi-timeframe architecture
 # ---------------------------------------------------------------------------
-# Before entering a position, fetch the last 4 x 15-min candles and verify
-# that price momentum is still alive in the signal direction.
-# This prevents entering at the top of a 1H rally that peaked before entry.
+# Three candle layers — each serves a different purpose:
 #
-# True  → check is active (recommended)
-# False → skip check, enter on 1H signal alone (old behaviour)
+#   4H candles  → Macro direction per coin. Replaces EMA200-only S3 check.
+#                 4H Supertrend bullish = coin is in a genuine multi-hour uptrend.
+#                 4H bearish = counter-trend trade, use tighter TP/trail.
+#
+#   1H candles  → Core signal. EMA200, EMA50, RSI, ADX, ATR, Supertrend, Volume.
+#                 Primary scoring system (need 2 of 4 soft conditions).
+#
+#   15-min candles → Entry timing + counter-trend exit monitoring.
+#                 At entry: 15-min RSI must be > 50 and rising.
+#                 During hold (counter-trend only): if 15-min Supertrend flips
+#                 bearish for 2 consecutive bars → early exit before full reversal.
 
-CONFIRM_15MIN = True
+CONFIRM_15MIN         = True    # gate 15-min momentum check at entry
+USE_4H_REGIME         = True    # use 4H candles for per-coin macro direction
+
+# Counter-trend early exit via 15-min monitoring
+CT_EXIT_15MIN         = True    # monitor counter-trend positions every 15-min run
+CT_EXIT_CONSEC_BARS   = 2       # consecutive 15-min bearish bars before early exit
+
+# 15-min RSI entry gate
+MIN_15MIN_RSI         = 50      # 15-min RSI must be above this at entry
+REQUIRE_15MIN_RSI_RISING = True  # 15-min RSI must also be rising bar-over-bar
+# ---------------------------------------------------------------------------
+# Diagnostic output switch
+# ---------------------------------------------------------------------------
+# When True: prints [DIAG], [VOL DIAG], [CT-monitor], [15min] lines every run.
+# When False: only prints entries, exits, signals, and portfolio snapshot.
+# Default OFF — keeps live.log small when running every 15 minutes.
+# Set True temporarily when debugging signal behaviour.
+
+VERBOSE_DIAG = False

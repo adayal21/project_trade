@@ -4,7 +4,8 @@ import requests
 from ta.trend import EMAIndicator, ADXIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
-from config import ADX_THRESHOLD, ATR_EXPANSION_RATIO, LONG_ONLY, LONG_SOFT_REQUIRED
+from config import (ADX_THRESHOLD, ATR_EXPANSION_RATIO, LONG_ONLY, LONG_SOFT_REQUIRED,
+                    MIN_15MIN_RSI, REQUIRE_15MIN_RSI_RISING, CT_EXIT_CONSEC_BARS)
 
 
 # ---------------------------------------------------------------------------
@@ -259,31 +260,17 @@ def generate_signal(
     return None
 
 # ---------------------------------------------------------------------------
-# 15-minute momentum confirmation — entry timing gate
+# Multi-timeframe candle fetchers
 # ---------------------------------------------------------------------------
-# Problem: 1H signals fire when all conditions align on the CLOSED 1H bar.
-# By then, the move that triggered the signal may have already peaked.
-# The bot enters on the next bar — potentially buying at the top of a rally.
-#
-# Fix: before entering, fetch the last 4 x 15-min candles (= 1 hour of
-# intra-bar data) and verify momentum is still alive in the signal direction.
-#
-# For a LONG signal, momentum is alive if EITHER:
-#   - The last 15-min close is ABOVE the previous 15-min close (price rising)
-#   - OR the 15-min RSI of the last bar is ABOVE the previous bar (RSI rising)
-# Both failing means the move peaked before our entry bar closed.
-#
-# This is a soft check — if the 15-min fetch fails for any reason (network,
-# no data), we allow entry rather than missing a valid trade.
 
-def fetch_15min(symbol: str, limit: int = 6) -> pd.DataFrame:
-    """Fetch recent 15-min candles for a symbol from CoinDCX public API."""
+def _fetch_candles(symbol: str, interval: str, limit: int) -> pd.DataFrame:
+    """Generic CoinDCX candle fetcher. interval: '15m', '1h', '4h' etc."""
     target, base = symbol.split("/")
     pair = f"I-{target}_{base}"
     try:
         r = requests.get(
             "https://public.coindcx.com/market_data/candles",
-            params={"pair": pair, "interval": "15m", "limit": limit},
+            params={"pair": pair, "interval": interval, "limit": limit},
             timeout=8
         )
         if r.status_code != 200:
@@ -293,6 +280,10 @@ def fetch_15min(symbol: str, limit: int = 6) -> pd.DataFrame:
             return pd.DataFrame()
         df = pd.DataFrame(data)
         df["close"]  = pd.to_numeric(df["close"])
+        df["high"]   = pd.to_numeric(df["high"])
+        df["low"]    = pd.to_numeric(df["low"])
+        df["open"]   = pd.to_numeric(df["open"])
+        df["volume"] = pd.to_numeric(df["volume"])
         df["time"]   = pd.to_datetime(pd.to_numeric(df["time"]), unit="ms")
         df = df.sort_values("time").reset_index(drop=True)
         return df
@@ -300,58 +291,176 @@ def fetch_15min(symbol: str, limit: int = 6) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def fetch_15min(symbol: str, limit: int = 20) -> pd.DataFrame:
+    """Fetch recent 15-min candles."""
+    return _fetch_candles(symbol, "15m", limit)
+
+
+def fetch_4h(symbol: str, limit: int = 100) -> pd.DataFrame:
+    """Fetch recent 4H candles — used for macro direction per coin."""
+    return _fetch_candles(symbol, "4h", limit)
+
+
+# ---------------------------------------------------------------------------
+# 4H macro direction — per-coin regime
+# ---------------------------------------------------------------------------
+
+def get_4h_direction(symbol: str) -> tuple[str, str]:
+    """
+    Determine the 4H macro direction for a coin.
+    Returns (direction, reason) where direction is 'BULL', 'BEAR', or 'NEUTRAL'.
+
+    Uses:
+      - 4H Supertrend (10-period, multiplier 3)
+      - 4H EMA50 vs Close
+
+    Both must agree for a directional read. One disagreeing = NEUTRAL.
+    Falls back to NEUTRAL on fetch failure (fail-open for entries).
+    """
+    df = fetch_4h(symbol, limit=100)
+    if df.empty or len(df) < 55:
+        return "NEUTRAL", "4H fetch failed — defaulting to NEUTRAL"
+
+    # Rename columns for indicator compatibility
+    df_ind = df.rename(columns={"close": "Close", "high": "High",
+                                 "low": "Low", "open": "Open", "volume": "Volume"})
+
+    # EMA50 on 4H
+    ema50 = EMAIndicator(df_ind["Close"], window=50).ema_indicator().iloc[-1]
+    close = float(df_ind["Close"].iloc[-1])
+    ema50_bull = close > float(ema50)
+
+    # Supertrend on 4H (simplified — use last 2 bars for direction)
+    try:
+        atr_4h = AverageTrueRange(df_ind["High"], df_ind["Low"],
+                                   df_ind["Close"], window=10).average_true_range()
+        hl2    = (df_ind["High"] + df_ind["Low"]) / 2
+        upper  = (hl2 + 3 * atr_4h).iloc[-2]
+        lower  = (hl2 - 3 * atr_4h).iloc[-2]
+        prev_close = float(df_ind["Close"].iloc[-2])
+        # Simplified: price above upper band last bar = bull, below lower = bear
+        st_bull = prev_close > float((hl2 - 3 * atr_4h).iloc[-2])
+        st_bear = prev_close < float((hl2 + 3 * atr_4h).iloc[-2])
+        # More reliable: use current close vs midband
+        midband = float(hl2.iloc[-1])
+        st_bull = close > midband
+    except Exception:
+        st_bull = ema50_bull   # fallback: agree with EMA50
+
+    if ema50_bull and st_bull:
+        return "BULL", f"4H BULL (Close={close:.4f} > EMA50={ema50:.4f}, above midband)"
+    elif not ema50_bull and not st_bull:
+        return "BEAR", f"4H BEAR (Close={close:.4f} < EMA50={ema50:.4f}, below midband)"
+    else:
+        return "NEUTRAL", f"4H NEUTRAL (EMA50={'bull' if ema50_bull else 'bear'}, ST={'bull' if st_bull else 'bear'} — mixed)"
+
+
+# ---------------------------------------------------------------------------
+# 15-min entry gate — RSI-based momentum confirmation
+# ---------------------------------------------------------------------------
+
+def _compute_rsi(closes: list, period: int = 14) -> float:
+    """Simple RSI calculation on a list of closes."""
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
 def confirm_15min_momentum(symbol: str, signal_dir: str = "LONG") -> tuple[bool, str]:
     """
-    Check whether 15-min price momentum still supports the 1H signal direction.
+    15-min entry timing gate.
+
+    For LONG:
+      - 15-min RSI must be > MIN_15MIN_RSI (50)
+      - If REQUIRE_15MIN_RSI_RISING: RSI must also be rising bar-over-bar
+      - Stale data (identical closes) → fail-open (allow entry)
+      - Fetch failure → fail-open
 
     Returns (allowed, reason_string).
-    allowed=True  → momentum still alive, proceed with entry
-    allowed=False → momentum faded, skip this bar
-    allowed=True  → also returned on fetch failure (fail-open, don't miss trades)
     """
-    df = fetch_15min(symbol, limit=6)
+    df = fetch_15min(symbol, limit=20)
 
-    if df.empty or len(df) < 3:
-        # Can't fetch — fail open (allow entry, don't punish network issues)
+    if df.empty or len(df) < 5:
         return True, "15min fetch failed — allowing entry (fail-open)"
 
-    # Compute RSI on the 15-min closes using a simple 14-period window
-    # Only meaningful if we have enough bars; otherwise just use price direction
-    last_close  = float(df["close"].iloc[-1])
-    prev_close  = float(df["close"].iloc[-2])
-    prev2_close = float(df["close"].iloc[-3])
+    closes = df["close"].tolist()
+    last_close  = closes[-1]
+    prev_close  = closes[-2]
+    prev2_close = closes[-3]
 
-    # Stale data guard: if all closes are identical, CoinDCX 15-min feed is
-    # frozen (price not updating). Treat as fetch failure — fail open.
+    # Stale data guard
     if prev2_close == prev_close == last_close:
-        return True, (
-            f"15min data stale (identical closes: {last_close:.4f}) "
-            f"— allowing entry (fail-open)"
-        )
+        return True, (f"15min data stale (identical closes: {last_close:.4f}) "
+                      f"— allowing entry (fail-open)")
 
-    price_rising     = last_close > prev_close
-    price_was_rising = prev_close > prev2_close
+    # Compute RSI on last 20 bars
+    rsi_now  = _compute_rsi(closes, period=14)
+    rsi_prev = _compute_rsi(closes[:-1], period=14)
+    rsi_rising = rsi_now > rsi_prev
 
-    # For LONG: at least one of the last two 15-min bars should show rising price
-    # This allows for a one-bar pause without blocking entry
     if signal_dir == "LONG":
-        momentum_ok = price_rising or price_was_rising
-        if momentum_ok:
-            direction = "↑" if price_rising else "→↑"
-            return True, (
-                f"15min momentum OK ({direction} "
-                f"{prev2_close:.4f}→{prev_close:.4f}→{last_close:.4f})"
-            )
-        else:
-            return False, (
-                f"15min momentum FADED — price falling for 2+ bars "
-                f"({prev2_close:.4f}→{prev_close:.4f}→{last_close:.4f}). "
-                f"Entry skipped, re-evaluate next hour."
-            )
+        rsi_ok = rsi_now > MIN_15MIN_RSI
+        rising_ok = rsi_rising if REQUIRE_15MIN_RSI_RISING else True
 
-    # For SHORT (future use): price should be falling
+        if rsi_ok and rising_ok:
+            return True, (f"15min OK — RSI={rsi_now:.1f}{'↑' if rsi_rising else '→'} "
+                          f"price:{prev2_close:.4f}→{prev_close:.4f}→{last_close:.4f}")
+        elif not rsi_ok:
+            return False, (f"15min RSI too low ({rsi_now:.1f} < {MIN_15MIN_RSI}) "
+                           f"— entry skipped, re-evaluate next run")
+        else:
+            return False, (f"15min RSI falling ({rsi_now:.1f}↓ from {rsi_prev:.1f}) "
+                           f"— momentum not building, entry skipped")
+
+    # SHORT (future use)
     if signal_dir == "SHORT":
-        momentum_ok = (last_close < prev_close) or (prev_close < prev2_close)
-        return momentum_ok, f"15min SHORT momentum {'OK' if momentum_ok else 'FADED'}"
+        rsi_ok = rsi_now < (100 - MIN_15MIN_RSI)
+        return rsi_ok, f"15min SHORT RSI={rsi_now:.1f} {'OK' if rsi_ok else 'FADED'}"
 
     return True, "unknown direction — allowing entry"
+
+
+# ---------------------------------------------------------------------------
+# 15-min counter-trend position monitor — early exit detection
+# ---------------------------------------------------------------------------
+
+def check_15min_ct_exit(symbol: str) -> tuple[bool, str]:
+    """
+    For counter-trend LONG positions: check whether the 15-min trend has
+    flipped bearish, signalling the bounce is reversing.
+
+    Returns (should_exit, reason).
+    Requires CT_EXIT_CONSEC_BARS consecutive 15-min bearish closes to trigger.
+    This prevents exiting on single-bar noise.
+
+    Bearish = current close < previous close (simple price direction).
+    """
+    df = fetch_15min(symbol, limit=CT_EXIT_CONSEC_BARS + 3)
+
+    if df.empty or len(df) < CT_EXIT_CONSEC_BARS + 1:
+        return False, "15min CT check: insufficient data — holding"
+
+    closes = df["close"].tolist()
+
+    # Check last CT_EXIT_CONSEC_BARS bars are all falling
+    falling_count = 0
+    for i in range(1, CT_EXIT_CONSEC_BARS + 1):
+        if closes[-i] < closes[-(i + 1)]:
+            falling_count += 1
+
+    if falling_count >= CT_EXIT_CONSEC_BARS:
+        recent = "→".join(f"{c:.4f}" for c in closes[-(CT_EXIT_CONSEC_BARS + 1):])
+        return True, (f"15min CT exit: {falling_count} consecutive falling bars "
+                      f"({recent}) — bounce reversing, exiting early")
+
+    return False, f"15min CT: {falling_count}/{CT_EXIT_CONSEC_BARS} falling bars — holding"

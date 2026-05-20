@@ -1,4 +1,3 @@
-
 import os
 import pandas as pd
 from datetime import datetime
@@ -13,7 +12,7 @@ portfolio_file = f"{DATA_DIR}/portfolio.csv"
 def initialize_portfolio():
     if not os.path.exists(portfolio_file):
         df = pd.DataFrame([{
-            "Timestamp": datetime.now(),
+            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Cash": INITIAL_CAPITAL,
             "Equity": INITIAL_CAPITAL,
             "Open Positions": 0,
