@@ -139,13 +139,14 @@ TRAILING_STOP_PCT       = 0.020   # trail 2% below the high-water mark price
 # ---------------------------------------------------------------------------
 # 4A  Stagnant : bars >= MAX_HOLD_BARS         AND |move| < 0.5%   → no movement, cut it
 # 4D  Losing   : bars >= MAX_HOLD_BARS_LOSING  AND move < 0%       → thesis failed, cut early
-#                3 bars = 3h of continuous loss on 1h timeframe; no point waiting
+#                4 bars = 4h of continuous loss on 1h timeframe; gives one extra
+#                bar of patience for temporary dips before cutting
 #                (fires before the hard stop-loss; only when Tier 1 hasn't fired)
 # 4B  Stuck+   : bars >= MAX_HOLD_BARS_EXTENDED AND 0 < move < +2% → take small gain
 # 4C  Trail TO : Tier 1 fired AND bars >= MAX_HOLD_BARS_TRAIL      → exit remaining half
 
 MAX_HOLD_BARS            = 6      # bars before 4A (stagnant) time exit is eligible
-MAX_HOLD_BARS_LOSING     = 3      # bars before 4D (losing) time exit fires
+MAX_HOLD_BARS_LOSING     = 4      # bars before 4D (losing) time exit fires
 TIME_EXIT_MIN_MOVE_PCT   = 0.005  # 4A threshold: |move| < 0.5% = stagnant
 MAX_HOLD_BARS_EXTENDED   = 12     # 4B: exit stuck-profitable positions after this many bars
 MAX_HOLD_BARS_TRAIL      = 10     # 4C: close trailing half after this many bars post Tier 1
@@ -220,3 +221,14 @@ LONG_SOFT_REQUIRED = 2
 # Set to 3 to allow 3/4 or 4/4 independent LONGs through in BTC SHORT regime.
 
 REGIME_OVERRIDE_MIN_SCORE = 3
+# ---------------------------------------------------------------------------
+# 15-minute momentum confirmation gate
+# ---------------------------------------------------------------------------
+# Before entering a position, fetch the last 4 x 15-min candles and verify
+# that price momentum is still alive in the signal direction.
+# This prevents entering at the top of a 1H rally that peaked before entry.
+#
+# True  → check is active (recommended)
+# False → skip check, enter on 1H signal alone (old behaviour)
+
+CONFIRM_15MIN = True

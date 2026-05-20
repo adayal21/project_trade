@@ -14,8 +14,9 @@ from config import (
     MAX_HOLD_BARS_EXTENDED, MAX_HOLD_BARS_TRAIL,
     RSI_RESET_SHORT, RSI_RESET_LONG,
     LONG_ONLY, REGIME_ALLOWS_LONG_IN_NEUTRAL, REGIME_OVERRIDE_MIN_SCORE,
+    CONFIRM_15MIN,
 )
-from strategy import apply_indicators, generate_signal
+from strategy import apply_indicators, generate_signal, confirm_15min_momentum
 from portfolio import initialize_portfolio, log_portfolio
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -908,6 +909,18 @@ if entry_candidates:
             continue
 
         quantity = allocation / latest_price
+
+        # Gate 4: 15-min momentum confirmation
+        # Verifies that intra-bar momentum is still alive in the signal direction
+        # before committing. Prevents buying at the top of a 1H rally that has
+        # already peaked before our entry bar.
+        if CONFIRM_15MIN:
+            mom_ok, mom_reason = confirm_15min_momentum(symbol, signal_dir)
+            print(f"  [15min] {mom_reason}")
+            if not mom_ok:
+                print(f"  🚫 Entry skipped — 15-min momentum check failed.")
+                print()
+                continue
 
         # Live mode: place real buy order BEFORE saving position.
         if TRADING_MODE == "live":

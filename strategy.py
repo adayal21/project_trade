@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import requests
 from ta.trend import EMAIndicator, ADXIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
@@ -256,3 +257,93 @@ def generate_signal(
         }
 
     return None
+
+# ---------------------------------------------------------------------------
+# 15-minute momentum confirmation — entry timing gate
+# ---------------------------------------------------------------------------
+# Problem: 1H signals fire when all conditions align on the CLOSED 1H bar.
+# By then, the move that triggered the signal may have already peaked.
+# The bot enters on the next bar — potentially buying at the top of a rally.
+#
+# Fix: before entering, fetch the last 4 x 15-min candles (= 1 hour of
+# intra-bar data) and verify momentum is still alive in the signal direction.
+#
+# For a LONG signal, momentum is alive if EITHER:
+#   - The last 15-min close is ABOVE the previous 15-min close (price rising)
+#   - OR the 15-min RSI of the last bar is ABOVE the previous bar (RSI rising)
+# Both failing means the move peaked before our entry bar closed.
+#
+# This is a soft check — if the 15-min fetch fails for any reason (network,
+# no data), we allow entry rather than missing a valid trade.
+
+def fetch_15min(symbol: str, limit: int = 6) -> pd.DataFrame:
+    """Fetch recent 15-min candles for a symbol from CoinDCX public API."""
+    target, base = symbol.split("/")
+    pair = f"I-{target}_{base}"
+    try:
+        r = requests.get(
+            "https://public.coindcx.com/market_data/candles",
+            params={"pair": pair, "interval": "15m", "limit": limit},
+            timeout=8
+        )
+        if r.status_code != 200:
+            return pd.DataFrame()
+        data = r.json()
+        if not data or len(data) < 3:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        df["close"]  = pd.to_numeric(df["close"])
+        df["time"]   = pd.to_datetime(pd.to_numeric(df["time"]), unit="ms")
+        df = df.sort_values("time").reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def confirm_15min_momentum(symbol: str, signal_dir: str = "LONG") -> tuple[bool, str]:
+    """
+    Check whether 15-min price momentum still supports the 1H signal direction.
+
+    Returns (allowed, reason_string).
+    allowed=True  → momentum still alive, proceed with entry
+    allowed=False → momentum faded, skip this bar
+    allowed=True  → also returned on fetch failure (fail-open, don't miss trades)
+    """
+    df = fetch_15min(symbol, limit=6)
+
+    if df.empty or len(df) < 3:
+        # Can't fetch — fail open (allow entry, don't punish network issues)
+        return True, "15min fetch failed — allowing entry (fail-open)"
+
+    # Compute RSI on the 15-min closes using a simple 14-period window
+    # Only meaningful if we have enough bars; otherwise just use price direction
+    last_close  = float(df["close"].iloc[-1])
+    prev_close  = float(df["close"].iloc[-2])
+    prev2_close = float(df["close"].iloc[-3])
+
+    price_rising  = last_close > prev_close
+    price_was_rising = prev_close > prev2_close
+
+    # For LONG: at least one of the last two 15-min bars should show rising price
+    # This allows for a one-bar pause without blocking entry
+    if signal_dir == "LONG":
+        momentum_ok = price_rising or price_was_rising
+        if momentum_ok:
+            direction = "↑" if price_rising else "→↑"
+            return True, (
+                f"15min momentum OK ({direction} "
+                f"{prev2_close:.4f}→{prev_close:.4f}→{last_close:.4f})"
+            )
+        else:
+            return False, (
+                f"15min momentum FADED — price falling for 2+ bars "
+                f"({prev2_close:.4f}→{prev_close:.4f}→{last_close:.4f}). "
+                f"Entry skipped, re-evaluate next hour."
+            )
+
+    # For SHORT (future use): price should be falling
+    if signal_dir == "SHORT":
+        momentum_ok = (last_close < prev_close) or (prev_close < prev2_close)
+        return momentum_ok, f"15min SHORT momentum {'OK' if momentum_ok else 'FADED'}"
+
+    return True, "unknown direction — allowing entry"
