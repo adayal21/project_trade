@@ -1,121 +1,151 @@
 # Crypto Trading Bot — CoinDCX INR
 
-A multi-timeframe momentum trading bot for Indian INR crypto pairs, built for paper trading validation before live deployment on CoinDCX.
+A multi-timeframe momentum trading bot for Indian INR crypto pairs on CoinDCX. Built for paper trading validation before live deployment.
 
 ---
 
 ## Architecture
 
 ### Data Sources
-| Timeframe | Purpose | Source |
-|---|---|---|
-| 1H candles | Core signal generation | CoinDCX public API (no auth) |
-| 15-min candles | Entry timing + counter-trend exit | CoinDCX public API (no auth) |
-| 4H candles | Per-coin macro direction | CoinDCX public API (no auth) |
+| Timeframe | Purpose |
+|---|---|
+| 1H candles | Core signal generation — EMA200, EMA50, RSI, ADX, ATR, Supertrend, Volume |
+| 15-min candles | Entry timing gate + counter-trend exit monitoring |
+| 4H candles | Per-coin macro direction (BULL/BEAR/NEUTRAL) |
 
-All candle data is fetched from `https://public.coindcx.com/market_data/candles`. No authentication required for market data. Execution (live mode only) uses the authenticated CoinDCX trading API.
+All data from `https://public.coindcx.com/market_data/candles` (no auth needed).
 
 ### Trading Mode
-Controlled by a single constant in `config.py` or the `TRADING_MODE` environment variable:
-- `"paper"` — simulates trades in CSV files, no real orders placed (default)
-- `"live"` — connects to CoinDCX account, places real market orders
+Set in `.env` or `config.py`:
+- `"paper"` — simulates trades in CSV files, no real orders (default)
+- `"live"` — connects to CoinDCX, places real market orders
+
+---
+
+## Coin Universe (25 tradeable + BTC regime reference)
+
+| Band | Coins | BTC Correlation |
+|---|---|---|
+| Negative / near-zero | FTM, ENJ, DENT, MANA, SAND, XLM, CHZ, MATIC, ETH, HOT | -0.65 to +0.33 |
+| Low-moderate | ARB, ATOM, AAVE, XRP, NEAR, VET, SHIB, GALA, BNB, SUSHI | +0.38 to +0.70 |
+| Moderate, diverse sectors | ALGO, TRX, FIL, DOT, SOL | +0.72 to +0.76 |
+
+BTC/INR is both the regime gate AND tradeable. Blocked from regime override when BTC itself is in SHORT regime (correlation = 1.0 with itself).
+
+Coins with BTC correlation > 0.75 are blocked from the regime override in BTC SHORT — they follow BTC too closely to trade independently in a bear market.
 
 ---
 
 ## Strategy
 
-### Signal Generation (1H)
+### Signal Generation (1H candles)
 
 **Hard filters — both must pass:**
-| Filter | Condition |
-|---|---|
-| ADX regime | ADX > 18 (trending market) |
-| ATR expansion | ATR >= 50% of 20-bar ATR SMA |
+- ADX > 18 (trending market, not choppy)
+- ATR >= 50% of 20-bar ATR average (volatility expanding, not compressing)
 
 **Mandatory condition:**
-- Supertrend must be bullish
+- 1H Supertrend must be bullish
 
-**Soft conditions — need 2 of 4:**
-| | Condition |
-|---|---|
-| S1 | RSI > 52 |
-| S2 | Volume > 20-bar median volume |
-| S3 | Close > EMA200 (macro trend) |
-| S4 | Close > EMA50 (local trend) |
+**Soft scoring — need 2 of 4:**
+| | Condition | Label |
+|---|---|---|
+| S1 | RSI > 52 | Momentum |
+| S2 | Volume > 20-bar median | Participation |
+| S3 | Close > EMA200 | Macro trend |
+| S4 | Close > EMA50 | Local trend |
 
-If S3 is not satisfied → trade flagged as **counter-trend** (bounce against macro). Counter-trend trades use tighter TP and trailing stop targets.
+Score 4/4 = strongest signal. Score 2/4 = minimum to enter.
 
-### Entry Gates (in order)
+If S3 fails (price below EMA200) → **counter-trend trade** — tighter targets applied.
+If 4H direction is BEAR → also flagged as counter-trend regardless of S3.
+
+### Entry Gates (checked in order)
 
 | Gate | Check |
 |---|---|
 | 1 | Position is flat (no open position on this coin) |
-| 1.5 | RSI reset filter — after a losing trade, RSI must reset past 45/55 before re-entry |
-| 2 | BTC regime filter — blocks entries if BTC macro is confirmed SHORT (with override for high-conviction 3+/4 scores) |
-| 3 | Position count ≤ MAX_POSITIONS_PER_DIR and capital guard ≤ MAX_ALLOCATION |
-| 4 | 15-min momentum gate — 15-min RSI must be > 50 and rising at entry time |
+| 1.5 | RSI reset filter — after a losing trade, RSI must reset past 45/55 |
+| 2 | BTC regime filter — SHORT regime blocks entries (with override for score ≥3/4, low-corr coins) |
+| 3 | Max 6 simultaneous LONGs, max 80% capital deployed |
+| 4 | 15-min RSI must be > 50 and rising at entry time |
 
-All candidates passing Gates 1–2 are ranked by score (4/4 > 3/4 > 2/4) then ADX before Gate 3 is applied. Highest conviction always enters first.
+All qualifying candidates are **ranked by score then ADX** before Gate 3. Highest conviction enters first regardless of list position.
 
-### Exit Logic
+### Exit Logic (fires in this order every 15-min run)
 
-**Tier 1 — Partial profit-taking:**
-- Take 50% off the table at +3.0% (trend) or +1.5% (counter-trend)
+**Tier 5 — Signal deterioration (fastest exit)**
+If 1H signal score drops to ≤1/4 → exit immediately. Applies to all positions whether profitable or losing, whether pre or post Tier 1. No waiting.
 
-**Tier 2 — Trailing stop:**
-- Trail remaining 50% at 2.0% below high-water mark (trend) or 1.0% (counter-trend)
-- Activates only after Tier 1 fires
+**Tier 0 — Counter-trend 15-min reversal**
+For counter-trend positions only: if 2 consecutive 15-min bars are falling → exit before reversal eats the 1.5% target.
 
-**Tier 0 — Counter-trend 15-min exit:**
-- For counter-trend positions only: if 2 consecutive 15-min bars are falling → exit immediately
-- Catches bounce reversals before they erase the 1.5% target
+**Tier 3 — Hard stop-loss**
+Exit at -4% from entry. Catastrophe brake.
 
-**Tier 3 — Hard stop-loss:**
-- Exit at -4% from entry (catastrophe brake)
+**Tier 1 — Partial profit-taking**
+- Trend trades: sell 50% at +3.0%
+- Counter-trend trades: sell 50% at +1.5%
 
-**Tier 4 — Time-based exits (hour-based, timeframe-agnostic):**
+**Tier 2 — Trailing stop on remaining 50%**
+Follows price upward, exits if price falls back:
+- BTC LONG regime + trend trade: 3% below peak (wider, captures bigger bull moves)
+- BTC SHORT/NEUTRAL + trend trade: 2% below peak
+- Counter-trend: 1% below peak
+
+**Tier 4 — Time-based backstops (hour-based, not bar-based)**
 | Sub-tier | Condition | Action |
 |---|---|---|
-| 4A Stagnant | 6h held, \|move\| < 0.5% | Exit — no momentum |
-| 4D Losing | 4h held, move < 0% | Exit — thesis failed |
-| 4B Stuck+ | 12h held, 0 < move < TP | Exit — take small gain |
-| 4C Trail timeout | 10h after Tier 1 fired | Exit remaining half |
+| 4A | 6h held, move < 0.5% either way | Exit — stagnant, free up capital |
+| 4D | 4h held, still losing | Exit — thesis failed |
+| 4B | 12h held, profitable but below TP | Exit — take small gain |
+| 4C | 4h after Tier 1 fired | Exit remaining half — don't wait indefinitely |
 
 ---
 
-## Coin Universe
-
-25 coins total. BTC/INR is the regime reference only (never traded).
-
-| Band | Coins | BTC Correlation |
-|---|---|---|
-| Very low / negative | ETH, CHZ, DENT, HOT, ATOM, AAVE | -0.43 to +0.48 |
-| Low-moderate | XRP, NEAR, VET, SHIB, WIN, GALA, BNB, SUSHI | +0.59 to +0.70 |
-| Moderate, diverse sectors | ALGO, TRX, FIL, DOT, CRV, SOL, GRT, AVAX, SNX, UNI | +0.72 to +0.78 |
-
-Correlation measured over 720 bars (30 days) of 1H CoinDCX data. Lower correlation = more independent movement from BTC.
-
----
-
-## Configuration (`config.py`)
-
-### Key constants
+## Key Configuration (`config.py`)
 
 ```python
-INITIAL_CAPITAL       = 10000    # paper mode starting capital (₹)
-RISK_PER_TRADE        = 0.10     # 10% of available cash per trade
-MAX_POSITIONS_PER_DIR = 5        # max simultaneous LONG positions
-STOP_LOSS_PCT         = 0.040    # hard stop at -4%
-PARTIAL_TAKE_PROFIT_PCT = 0.030  # Tier 1 TP at +3% (trend)
-COUNTER_TREND_TP_PCT  = 0.015    # Tier 1 TP at +1.5% (counter-trend)
-LONG_ONLY             = True     # spot trading — no shorts
-VERBOSE_DIAG          = False    # set True to enable detailed indicator logs
+# Capital
+INITIAL_CAPITAL         = 10000   # paper mode (₹)
+RISK_PER_TRADE          = 0.08    # 8% of cash per trade
+MAX_POSITIONS_PER_DIR   = 6       # max 6 simultaneous LONGs
+MAX_ALLOCATION          = 0.80    # never deploy more than 80% of capital
+STOP_LOSS_PCT           = 0.040   # hard stop at -4%
+
+# Profit targets
+PARTIAL_TAKE_PROFIT_PCT = 0.030   # Tier 1 at +3% (trend)
+COUNTER_TREND_TP_PCT    = 0.015   # Tier 1 at +1.5% (counter-trend)
+
+# Trailing stops
+BULL_TRAILING_STOP_PCT  = 0.030   # 3% trail in BTC LONG regime
+TRAILING_STOP_PCT       = 0.020   # 2% trail in BTC SHORT/NEUTRAL
+COUNTER_TREND_TRAIL_PCT = 0.010   # 1% trail for counter-trend trades
+
+# Time exits (hours)
+TIME_EXIT_LOSING_HOURS    = 4     # cut losing positions after 4h
+TIME_EXIT_STAGNANT_HOURS  = 6     # cut flat positions after 6h
+TIME_EXIT_EXTENDED_HOURS  = 12    # cut stuck-profitable after 12h
+TIME_EXIT_TRAIL_HOURS     = 4     # exit trailing half after 4h post Tier 1
+
+# Signal
+SIGNAL_EXIT_THRESHOLD     = 1     # Tier 5 fires at score ≤1/4
+REGIME_OVERRIDE_MIN_SCORE = 3     # min score to override BTC SHORT regime
+REGIME_OVERRIDE_MAX_CORR  = 0.75  # max BTC corr allowed to override
+
+# Multi-timeframe
+CONFIRM_15MIN             = True  # 15-min RSI gate at entry
+USE_4H_REGIME             = True  # 4H macro direction per coin
+CT_EXIT_15MIN             = True  # 15-min counter-trend exit monitoring
+
+# Logging
+VERBOSE_DIAG              = False # set True for detailed per-coin indicator logs
 ```
 
 ### Live trading capital
-
+Set in `.env`:
 ```
-LIVE_INITIAL_CAPITAL=1000   # set in .env file
+LIVE_INITIAL_CAPITAL=1000
 ```
 
 ---
@@ -137,22 +167,20 @@ Requirements: `pandas`, `numpy`, `requests`, `ta`, `python-dotenv`
 python main.py
 ```
 
+### Cron job — every 15 minutes
+```
+*/15 * * * * /path/to/python /path/to/main.py >> /path/to/logs/live.log 2>&1
+```
+
 ### Before going live — connectivity test
 ```bash
 python connectivity_test.py
 ```
-Safe to run anytime. Verifies API keys, reads balance, checks symbol formats. No real orders placed.
-
-### Cron job (recommended: every 15 minutes)
-```
-*/15 * * * * /path/to/venv/bin/python /path/to/main.py >> /path/to/logs/live.log 2>&1
-```
+Safe to run anytime. Verifies API keys, reads balance, dry-run order test. No real orders placed.
 
 ---
 
-## Environment Variables
-
-Create a `.env` file in the project root:
+## Environment Variables (`.env` file)
 
 ```
 COINDCX_API_KEY=your_api_key
@@ -169,48 +197,58 @@ LIVE_INITIAL_CAPITAL=1000
 
 ## Switching to Live Trading
 
-1. Deposit INR to your CoinDCX account (minimum ₹500)
-2. Run `python connectivity_test.py` — confirm balance shows correctly
+1. Deposit INR to CoinDCX (minimum ₹500)
+2. Run `python connectivity_test.py` — confirm balance shows
 3. Set `TRADING_MODE=live` in `.env`
 4. Run one cycle manually: `python main.py`
-5. Verify the first trade log shows live order placement
-6. Enable the 15-minute cron job
+5. Verify first trade log shows live order placement
+6. Enable cron job
 
 ---
 
-## Data Output (`data/` directory)
+## Data Files (`data/` directory)
 
 | File | Contents |
 |---|---|
-| `portfolio.csv` | Equity curve, cash, P&L snapshots per run |
+| `portfolio.csv` | Equity curve — cash, P&L, open positions per run |
 | `{COIN}_position.csv` | Current open position (deleted on close) |
 | `{COIN}_trades.csv` | Full trade history: entry, exit, P&L, exit reason |
+
+**Never delete CSVs in live mode** — they are the position state. In paper mode, deleting `data/*.csv` gives a fresh start.
 
 ---
 
 ## Telegram Notifications
 
-`send_telegram.py` sends portfolio snapshot + open positions to a Telegram chat after each run. Add to cron after the main bot:
-
+`send_telegram.py` sends portfolio snapshot + open positions after each run.
+Currently disabled — enable when moving to live trading by adding to cron:
 ```
-*/15 * * * * /path/to/python /path/to/main.py >> /path/to/logs/live.log 2>&1
 */15 * * * * /path/to/python /path/to/send_telegram.py
 ```
 
 ---
 
-## Taxes (India)
+## Indian Tax Notes
 
-- **30% flat tax** on all crypto gains
-- **1% TDS** deducted per transaction by CoinDCX automatically
+- **30% flat tax** on all crypto gains (no deductions)
+- **1% TDS** deducted per transaction automatically by CoinDCX
 - No loss offset between trades
-- Factor this into profitability expectations — consult a CA before going live
+- Consult a CA before going live — the 1% TDS compounds across every trade
 
 ---
 
-## Notes
+## File Reference
 
-- Paper trading state persists across restarts via CSV files
-- Cash balance reloads from `portfolio.csv` on restart
-- In live mode, positions are reconciled with actual CoinDCX holdings at startup to prevent double-entry after crashes
-- `VERBOSE_DIAG = True` in config enables detailed per-coin indicator logs for debugging
+| File | Purpose |
+|---|---|
+| `main.py` | Core bot loop — signal evaluation, entry, exit, portfolio tracking |
+| `strategy.py` | Indicator calculations, signal generation, 15-min/4H functions |
+| `config.py` | All constants and settings |
+| `portfolio.py` | Portfolio CSV logging |
+| `exchange.py` | CoinDCX live order execution layer |
+| `coindcx_auth.py` | HMAC-SHA256 signing for authenticated API calls |
+| `connectivity_test.py` | Pre-live API verification script |
+| `send_telegram.py` | Telegram notification script |
+| `verify_coins.py` | Verify all coins are available on CoinDCX with sufficient data |
+| `find_replacement.py` | Find replacement coins by scanning CoinDCX for correlation/volume |
+| `test.py` | BTC correlation and volume study for coin selection |
