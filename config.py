@@ -91,9 +91,9 @@ COINS = [
 STOP_LOSS_PCT         = 0.040  # hard stop — catastrophe brake. TIME_EXIT_LOSING
                                # typically fires first at MAX_HOLD_BARS_LOSING.
 MAX_ALLOCATION        = 0.80   # never deploy more than 80% of equity at once
-MAX_POSITIONS_PER_DIR = 5      # allow up to 5 LONGs simultaneously (25 coins, max 20% in trades)
+MAX_POSITIONS_PER_DIR = 6      # allow up to 6 LONGs simultaneously
 TIMEFRAME             = "1h"
-RISK_PER_TRADE        = 0.10
+RISK_PER_TRADE        = 0.08
 DATA_DIR              = "data"
 
 # ---------------------------------------------------------------------------
