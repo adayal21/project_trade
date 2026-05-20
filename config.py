@@ -157,27 +157,22 @@ TRAILING_STOP_PCT       = 0.020   # trail 2% below the high-water mark price
 # Using hours instead of bars makes exits timeframe-agnostic — correct
 # whether the cron runs every 15 minutes or every hour.
 #
-# 4A  Stagnant : hours_held >= TIME_EXIT_STAGNANT_HOURS  AND |move| < 0.5%
-# 4D  Losing   : hours_held >= TIME_EXIT_LOSING_HOURS    AND move < 0%
-# 4B  Stuck+   : hours_held >= TIME_EXIT_EXTENDED_HOURS  AND 0 < move < TP
-# 4C  Trail TO : Tier 1 fired AND hours_held >= TIME_EXIT_TRAIL_HOURS
-
-# 4A  Stagnant : hours_held >= TIME_EXIT_STAGNANT_HOURS  AND |move| < 0.5%
+# 4A  Stagnant : hours_held >= TIME_EXIT_STAGNANT_HOURS  AND |move| < 0.3%
 # 4D  Losing   : hours_held >= TIME_EXIT_LOSING_HOURS    AND move < 0%
 # 4B  Stuck+   : hours_held >= TIME_EXIT_EXTENDED_HOURS  AND 0 < move < TP
 # 4C  Trail TO : Tier 1 fired AND hours_held >= TIME_EXIT_TRAIL_HOURS
 #
-# Stagnant hours is regime-aware: in a bull market we cut dead positions faster
-# (3h) because good money should be redeployed into active moves.
-# In neutral/bear we give 6h since fewer alternatives are available.
+# Philosophy: capital should never sit idle. If a trade isn't moving toward
+# profit within a tight window, the thesis is wrong — free up the slot.
+# Maximum any trade can stay alive: 2h (4B stuck profitable, worst case).
 
-TIME_EXIT_STAGNANT_HOURS      = 6    # 4A: default (neutral/bear)
-TIME_EXIT_STAGNANT_HOURS_BULL = 3    # 4A: in BTC LONG regime — cut faster, redeploy
-TIME_EXIT_LOSING_HOURS        = 4    # 4D: cut losing position after 4h (bull)
-TIME_EXIT_LOSING_HOURS_BEAR   = 2    # 4D: cut losing position after 2h (neutral/bear)
-TIME_EXIT_MIN_MOVE_PCT        = 0.003 # 4A threshold: |move| < 0.3% = stagnant (was 0.5%)
-TIME_EXIT_EXTENDED_HOURS      = 12   # 4B: exit stuck-profitable after 12h
-TIME_EXIT_TRAIL_HOURS         = 4    # 4C: close trailing half 4h after Tier 1 if not moved
+TIME_EXIT_STAGNANT_HOURS      = 1    # 4A: NEUTRAL/BEAR — market not supporting move, cut at 1h
+TIME_EXIT_STAGNANT_HOURS_BULL = 1    # 4A: BTC LONG — same, 1h across the board
+TIME_EXIT_LOSING_HOURS        = 1    # 4D: cut losing position after 1h — thesis failed
+TIME_EXIT_LOSING_HOURS_BEAR   = 1    # 4D: same in neutral/bear — no reason to hold longer
+TIME_EXIT_MIN_MOVE_PCT        = 0.003 # 4A threshold: |move| < 0.3% = stagnant
+TIME_EXIT_EXTENDED_HOURS      = 2    # 4B: stuck profitable but no TP — exit at 2h, take what you have
+TIME_EXIT_TRAIL_HOURS         = 2    # 4C: trailing remainder — close 2h after Tier 1, don't wait indefinitely
 
 # ---------------------------------------------------------------------------
 # RSI reset thresholds — re-entry filter after losing trades
