@@ -37,47 +37,48 @@ else:
 
 COINS = [
     # -----------------------------------------------------------------------
-    # Regime reference — never traded, only used for BTC macro regime gate
+    # BTC/INR — regime gate AND tradeable.
+    # Blocked from override in BTC SHORT regime (corr=1.0 with itself).
     # -----------------------------------------------------------------------
     "BTC/INR",
 
     # -----------------------------------------------------------------------
-    # Band 1 — very low / negative BTC correlation (most independent)
-    # These can move against BTC direction entirely
+    # Band 1 — negative / near-zero BTC correlation (most independent)
+    # These move against BTC or on their own narrative entirely
     # -----------------------------------------------------------------------
-    "ETH/INR",    # corr=+0.22 — Layer 1, most independent on INR markets
-    "CHZ/INR",    # corr=-0.17 — Sports/fan tokens, event-driven
+    "FTM/INR",    # corr=-0.65 — Fantom L1, strongest negative corr available
+    "ENJ/INR",    # corr=-0.49 — Gaming NFT / Enjin ecosystem
     "DENT/INR",   # corr=-0.43 — Telecom data token, strongly decorrelated
+    "MANA/INR",   # corr=-0.40 — Metaverse / Decentraland, own narrative
+    "SAND/INR",   # corr=-0.39 — Metaverse / gaming, own narrative
+    "XLM/INR",    # corr=-0.22 — Stellar payments, negative correlation
+    "CHZ/INR",    # corr=-0.17 — Sports/fan tokens, event-driven
+    "MATIC/INR",  # corr=+0.13 — Polygon L2, most independent L2 available
+    "ETH/INR",    # corr=+0.22 — Layer 1, most independent on INR markets
     "HOT/INR",    # corr=+0.33 — Holochain/Web3, own ecosystem, high volume
-    "ATOM/INR",   # corr=+0.47 — Cosmos IBC, proven independent (live trade hit)
-    "AAVE/INR",   # corr=+0.48 — DeFi lending, protocol-driven narrative
 
     # -----------------------------------------------------------------------
     # Band 2 — low-moderate BTC correlation (moves partly independently)
     # -----------------------------------------------------------------------
+    "ARB/INR",    # corr=+0.38 — Arbitrum L2, Ethereum ecosystem narrative
+    "ATOM/INR",   # corr=+0.47 — Cosmos IBC, proven independent (live trade hit)
+    "AAVE/INR",   # corr=+0.48 — DeFi lending, protocol-driven narrative
     "XRP/INR",    # corr=+0.59 — Payments/remittance, regulatory news driven
     "NEAR/INR",   # corr=+0.60 — Layer 1, own developer ecosystem
     "VET/INR",    # corr=+0.65 — Supply chain, enterprise partnerships driven
     "SHIB/INR",   # corr=+0.65 — Meme, community/social driven, huge volume
-    "WIN/INR",    # corr=+0.68 — Gaming/TRON ecosystem, very high volume
     "GALA/INR",   # corr=+0.70 — Gaming token, own game launches
     "BNB/INR",    # corr=+0.70 — Exchange token, own exchange dynamics
     "SUSHI/INR",  # corr=+0.70 — DEX protocol, DeFi narrative
 
     # -----------------------------------------------------------------------
-    # Band 3 — moderate BTC correlation, but diverse sectors
-    # Each has its own narrative that can diverge for hours/days
+    # Band 3 — moderate BTC correlation, diverse sectors
     # -----------------------------------------------------------------------
     "ALGO/INR",   # corr=+0.72 — Layer 1 / payments, institutional focus
     "TRX/INR",    # corr=+0.72 — Layer 1 / content, TRON ecosystem
     "FIL/INR",    # corr=+0.74 — Decentralised storage, independent demand
     "DOT/INR",    # corr=+0.75 — Parachain, own governance narrative
-    "CRV/INR",    # corr=+0.75 — DEX stableswap, unique DeFi niche
     "SOL/INR",    # corr=+0.76 — Solana ecosystem, own developer community
-    "GRT/INR",    # corr=+0.76 — Data indexing, unique sector
-    "AVAX/INR",   # corr=+0.77 — Layer 1 DeFi, own subnet ecosystem
-    "SNX/INR",    # corr=+0.78 — Synthetic assets, unique DeFi product
-    "UNI/INR",    # corr=+0.78 — Largest DEX, DeFi governance narrative
 ]
 
 # ---------------------------------------------------------------------------
@@ -257,3 +258,64 @@ REQUIRE_15MIN_RSI_RISING = True  # 15-min RSI must also be rising bar-over-bar
 # Set True temporarily when debugging signal behaviour.
 
 VERBOSE_DIAG = False
+# ---------------------------------------------------------------------------
+# Correlation-based regime override block
+# ---------------------------------------------------------------------------
+# Coins with BTC correlation above this threshold are blocked from the regime
+# override in BTC SHORT regime. High-correlation coins essentially move with
+# BTC — buying them when BTC is falling is the same risk as buying BTC itself.
+# BTC itself (corr=1.0) is always blocked from override in SHORT regime.
+#
+# Coins with corr <= threshold CAN override (genuinely independent momentum).
+# Coins with corr >  threshold CANNOT override (too correlated to BTC).
+
+REGIME_OVERRIDE_MAX_CORR = 0.75   # block override for corr > 0.75 in BTC SHORT
+
+# Correlation map — used at entry to check override eligibility
+# Values from 720-bar CoinDCX correlation study
+COIN_BTC_CORR = {
+    # Band 1 — negative / near-zero
+    "BTC/INR":   1.000,
+    "FTM/INR":  -0.650,
+    "ENJ/INR":  -0.494,
+    "DENT/INR": -0.430,
+    "MANA/INR": -0.400,
+    "SAND/INR": -0.390,
+    "XLM/INR":  -0.221,
+    "CHZ/INR":  -0.165,
+    "MATIC/INR":  0.130,
+    "ETH/INR":   0.215,
+    "HOT/INR":   0.334,
+    # Band 2
+    "ARB/INR":   0.384,
+    "ATOM/INR":  0.470,
+    "AAVE/INR":  0.480,
+    "XRP/INR":   0.589,
+    "NEAR/INR":  0.604,
+    "VET/INR":   0.647,
+    "SHIB/INR":  0.648,
+    "GALA/INR":  0.698,
+    "BNB/INR":   0.699,
+    "SUSHI/INR": 0.699,
+    # Band 3
+    "ALGO/INR":  0.717,
+    "TRX/INR":   0.723,
+    "FIL/INR":   0.741,
+    "DOT/INR":   0.750,
+    "SOL/INR":   0.764,
+}
+
+# ---------------------------------------------------------------------------
+# Signal deterioration exit (Tier 5)
+# ---------------------------------------------------------------------------
+# If a held position's 1H signal score drops to SIGNAL_EXIT_THRESHOLD or below
+# on the current run, exit immediately — the thesis that caused entry has
+# reversed. No need to wait for the time-based exits.
+#
+# Entry required score: 2/4 (LONG_SOFT_REQUIRED)
+# Exit trigger: score <= 1/4 — only 1 or 0 conditions still agree
+#
+# Set to -1 to disable this exit entirely.
+
+SIGNAL_DETERIORATION_EXIT = True
+SIGNAL_EXIT_THRESHOLD     = 1    # exit if score drops to 1 or below (was 2+ at entry)

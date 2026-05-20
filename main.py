@@ -15,6 +15,8 @@ from config import (
     RSI_RESET_SHORT, RSI_RESET_LONG,
     LONG_ONLY, REGIME_ALLOWS_LONG_IN_NEUTRAL, REGIME_OVERRIDE_MIN_SCORE,
     CONFIRM_15MIN, USE_4H_REGIME, CT_EXIT_15MIN, VERBOSE_DIAG,
+    REGIME_OVERRIDE_MAX_CORR, COIN_BTC_CORR,
+    SIGNAL_DETERIORATION_EXIT, SIGNAL_EXIT_THRESHOLD,
 )
 from strategy import (apply_indicators, generate_signal,
                       confirm_15min_momentum, get_4h_direction, check_15min_ct_exit)
@@ -699,6 +701,52 @@ for symbol in COINS:
 
     # -------------------------------------------------------------------
     # -------------------------------------------------------------------
+    # Tier 5 — Signal deterioration exit
+    # -------------------------------------------------------------------
+    # If the 1H signal that caused entry has materially reversed — score
+    # dropped to SIGNAL_EXIT_THRESHOLD (≤1/4) — exit immediately.
+    # No point holding a position whose entry thesis is gone.
+    # Uses the already-fetched signal_data so zero extra API calls.
+    # -------------------------------------------------------------------
+    if position is not None and SIGNAL_DETERIORATION_EXIT and signal_data is not None:
+        current_score = signal_data.get('soft_confirmations', 0)
+        if current_score <= SIGNAL_EXIT_THRESHOLD:
+            side        = position['Side']
+            entry_price = float(position['Entry Price'])
+            quantity    = float(position['Quantity'])
+            move_pct    = (latest_price - entry_price) / entry_price if side == "LONG"                           else (entry_price - latest_price) / entry_price
+            pnl = move_pct * entry_price * quantity
+
+            realized_pnl    += pnl
+            total_trades    += 1
+            trades_this_run += 1
+            cash            += entry_price * quantity + pnl
+
+            s1 = signal_data.get('s1_rsi', False)
+            s2 = signal_data.get('s2_volume', False)
+            s3 = signal_data.get('s3_ema200', False)
+            s4 = signal_data.get('s4_ema50', False)
+            print(f"  📉 SIGNAL DETERIORATION exit — score dropped to {current_score}/4 "
+                  f"(RSI={s1} Vol={s2} EMA200={s3} EMA50={s4}) | PnL: {pnl:.2f}")
+
+            log_trade(symbol, {
+                "Coin":        symbol,
+                "Side":        side,
+                "Entry Price": entry_price,
+                "Exit Price":  latest_price,
+                "Quantity":    quantity,
+                "PnL":         round(pnl, 4),
+                "Exit Reason": "SIGNAL_DETERIORATION",
+                "Exit Time":   datetime.now(timezone.utc)
+            })
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(symbol, "sell", quantity)
+            clear_position(symbol)
+            dir_counts_cache = count_open_by_direction()
+            position = None
+
+    # -------------------------------------------------------------------
     # Tier 0 (new) — Counter-trend 15-min early exit
     # -------------------------------------------------------------------
     # For counter-trend LONGs only: monitor every 15-min run whether the
@@ -860,10 +908,21 @@ for symbol in COINS:
                 if btc_regime == "SHORT":
                     coin_score      = signal_data.get('soft_confirmations', 0)
                     is_ct           = signal_data.get('counter_trend', True) or _4h_ct
-                    regime_override = coin_score >= REGIME_OVERRIDE_MIN_SCORE and not is_ct
+                    coin_corr       = COIN_BTC_CORR.get(symbol, 1.0)
+                    corr_allows     = coin_corr <= REGIME_OVERRIDE_MAX_CORR
+                    regime_override = (
+                        coin_score >= REGIME_OVERRIDE_MIN_SCORE
+                        and not is_ct
+                        and corr_allows
+                    )
                     if regime_override:
                         print(f"  ⚡ BTC regime SHORT overridden — "
-                              f"coin score {coin_score}/4, not counter-trend.")
+                              f"coin score {coin_score}/4, corr={coin_corr:.2f}, not counter-trend.")
+                    elif not corr_allows:
+                        print(f"  🚫 BTC regime SHORT — blocked (corr={coin_corr:.2f} > {REGIME_OVERRIDE_MAX_CORR}). "
+                              f"Too correlated to BTC to trade in bear market.")
+                        print()
+                        continue
                     else:
                         print(f"  🚫 BTC regime SHORT — LONG entry blocked in bear market.")
                         print()
