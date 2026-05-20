@@ -651,11 +651,11 @@ for symbol in COINS:
                     "Exit Time":   datetime.now(timezone.utc)
                 })
 
-            if TRADING_MODE == "live":
-                from exchange import place_market_order
-                place_market_order(symbol, "sell", quantity)
+                if TRADING_MODE == "live":
+                    from exchange import place_market_order
+                    place_market_order(symbol, "sell", quantity)
                 clear_position(symbol)
-                dir_counts_cache = count_open_by_direction()  # refresh after close
+                dir_counts_cache = count_open_by_direction()
                 position = None
 
     # -------------------------------------------------------------------
@@ -1175,11 +1175,13 @@ for symbol in COINS:
     # Direction-aware profit %
     if side == "LONG":
         move_pct     = (current_price - entry_price) / entry_price
-        peak_pct     = (hwm - entry_price) / entry_price
+        true_peak    = max(hwm, current_price)
+        peak_pct     = (true_peak - entry_price) / entry_price
         reversal_pct = (hwm - current_price) / hwm if already_partial else None
     else:
         move_pct     = (entry_price - current_price) / entry_price
-        peak_pct     = (entry_price - hwm) / entry_price
+        true_peak    = min(hwm, current_price)
+        peak_pct     = (entry_price - true_peak) / entry_price
         reversal_pct = (current_price - hwm) / hwm if already_partial else None
 
     pnl = move_pct * entry_price * quantity
