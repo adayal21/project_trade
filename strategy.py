@@ -321,7 +321,15 @@ def confirm_15min_momentum(symbol: str, signal_dir: str = "LONG") -> tuple[bool,
     prev_close  = float(df["close"].iloc[-2])
     prev2_close = float(df["close"].iloc[-3])
 
-    price_rising  = last_close > prev_close
+    # Stale data guard: if all closes are identical, CoinDCX 15-min feed is
+    # frozen (price not updating). Treat as fetch failure — fail open.
+    if prev2_close == prev_close == last_close:
+        return True, (
+            f"15min data stale (identical closes: {last_close:.4f}) "
+            f"— allowing entry (fail-open)"
+        )
+
+    price_rising     = last_close > prev_close
     price_was_rising = prev_close > prev2_close
 
     # For LONG: at least one of the last two 15-min bars should show rising price
