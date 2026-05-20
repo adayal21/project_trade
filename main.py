@@ -15,6 +15,7 @@ from config import (
     RSI_RESET_SHORT, RSI_RESET_LONG,
     LONG_ONLY, REGIME_ALLOWS_LONG_IN_NEUTRAL, REGIME_OVERRIDE_MIN_SCORE,
     CONFIRM_15MIN, USE_4H_REGIME, CT_EXIT_15MIN, VERBOSE_DIAG,
+    BULL_TRAILING_STOP_PCT,
     REGIME_OVERRIDE_MAX_CORR, COIN_BTC_CORR,
     SIGNAL_DETERIORATION_EXIT, SIGNAL_EXIT_THRESHOLD,
 )
@@ -449,7 +450,9 @@ for symbol in COINS:
         else (_sig_ct or _4h_ct)
     )
     effective_tp    = COUNTER_TREND_TP_PCT    if is_counter_trend else PARTIAL_TAKE_PROFIT_PCT
-    effective_trail = COUNTER_TREND_TRAIL_PCT if is_counter_trend else TRAILING_STOP_PCT
+    # In bull regime, use wider 3% trail for trend longs to capture bigger moves
+    _base_trail     = BULL_TRAILING_STOP_PCT if (btc_regime == "LONG" and not is_counter_trend)                       else TRAILING_STOP_PCT
+    effective_trail = COUNTER_TREND_TRAIL_PCT if is_counter_trend else _base_trail
 
     # ------------------------------------------------------------------
     # [DIAG] Per-coin indicator snapshot — only printed when VERBOSE_DIAG=True
@@ -651,11 +654,11 @@ for symbol in COINS:
                     "Exit Time":   datetime.now(timezone.utc)
                 })
 
-                if TRADING_MODE == "live":
-                    from exchange import place_market_order
-                    place_market_order(symbol, "sell", quantity)
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(symbol, "sell", quantity)
                 clear_position(symbol)
-                dir_counts_cache = count_open_by_direction()
+                dir_counts_cache = count_open_by_direction()  # refresh after close
                 position = None
 
     # -------------------------------------------------------------------
@@ -1175,13 +1178,11 @@ for symbol in COINS:
     # Direction-aware profit %
     if side == "LONG":
         move_pct     = (current_price - entry_price) / entry_price
-        true_peak    = max(hwm, current_price)
-        peak_pct     = (true_peak - entry_price) / entry_price
+        peak_pct     = (hwm - entry_price) / entry_price
         reversal_pct = (hwm - current_price) / hwm if already_partial else None
     else:
         move_pct     = (entry_price - current_price) / entry_price
-        true_peak    = min(hwm, current_price)
-        peak_pct     = (entry_price - true_peak) / entry_price
+        peak_pct     = (entry_price - hwm) / entry_price
         reversal_pct = (current_price - hwm) / hwm if already_partial else None
 
     pnl = move_pct * entry_price * quantity

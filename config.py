@@ -319,3 +319,15 @@ COIN_BTC_CORR = {
 
 SIGNAL_DETERIORATION_EXIT = True
 SIGNAL_EXIT_THRESHOLD     = 1    # exit if score drops to 1 or below (was 2+ at entry)
+# ---------------------------------------------------------------------------
+# Regime-aware trailing stop
+# ---------------------------------------------------------------------------
+# In a bull market (BTC LONG), price trends further and normal pullbacks
+# are deeper before resuming. A wider trail gives positions room to breathe.
+#
+# BTC LONG regime  : 3% trail — more room to run, captures bigger moves
+# BTC SHORT/NEUTRAL: 2% trail — tighter, protects capital in weak markets
+#
+# Counter-trend trades always use COUNTER_TREND_TRAIL_PCT (1%) regardless.
+
+BULL_TRAILING_STOP_PCT = 0.030   # 3% trail when BTC regime is LONG
