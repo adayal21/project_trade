@@ -150,7 +150,7 @@ TIME_EXIT_STAGNANT_HOURS  = 6    # 4A: cut stagnant position after 6h
 TIME_EXIT_LOSING_HOURS    = 4    # 4D: cut losing position after 4h
 TIME_EXIT_MIN_MOVE_PCT    = 0.005 # 4A threshold: |move| < 0.5% = stagnant
 TIME_EXIT_EXTENDED_HOURS  = 12   # 4B: exit stuck-profitable after 12h
-TIME_EXIT_TRAIL_HOURS     = 10   # 4C: close trailing half 10h after Tier 1
+TIME_EXIT_TRAIL_HOURS     = 4    # 4C: close trailing half 4h after Tier 1 if not moved
 
 # ---------------------------------------------------------------------------
 # RSI reset thresholds — re-entry filter after losing trades
