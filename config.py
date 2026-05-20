@@ -91,9 +91,25 @@ COINS = [
 STOP_LOSS_PCT         = 0.040  # hard stop — catastrophe brake. TIME_EXIT_LOSING
                                # typically fires first at MAX_HOLD_BARS_LOSING.
 MAX_ALLOCATION        = 0.80   # never deploy more than 80% of equity at once
-MAX_POSITIONS_PER_DIR = 6      # allow up to 6 LONGs simultaneously
+
+# Regime-aware position limits:
+#   BTC LONG    → 8 positions (bull market, deploy more)
+#   BTC NEUTRAL → 6 positions (uncertain, maintain current exposure)
+#   BTC SHORT   → 3 positions (bear market, stay mostly cash)
+# The capital guard (MAX_ALLOCATION=80%) is the hard backstop regardless.
+MAX_POSITIONS_PER_DIR = 6      # default / neutral regime
+MAX_POSITIONS_BULL    = 8      # used when btc_regime == "LONG"
+MAX_POSITIONS_BEAR    = 3      # used when btc_regime == "SHORT"
 TIMEFRAME             = "1h"
-RISK_PER_TRADE        = 0.08
+
+# Score-based allocation — higher conviction gets more capital:
+#   4/4 score : 10% of cash  (strongest signal)
+#   3/4 score : 8%  of cash  (standard)
+#   2/4 score : 5%  of cash  (minimum entry, least capital)
+# RISK_PER_TRADE is the fallback if score is missing.
+RISK_PER_TRADE        = 0.08   # fallback / 3/4 default
+RISK_PER_TRADE_HIGH   = 0.10   # 4/4 score
+RISK_PER_TRADE_LOW    = 0.05   # 2/4 score
 DATA_DIR              = "data"
 
 # ---------------------------------------------------------------------------
@@ -146,11 +162,22 @@ TRAILING_STOP_PCT       = 0.020   # trail 2% below the high-water mark price
 # 4B  Stuck+   : hours_held >= TIME_EXIT_EXTENDED_HOURS  AND 0 < move < TP
 # 4C  Trail TO : Tier 1 fired AND hours_held >= TIME_EXIT_TRAIL_HOURS
 
-TIME_EXIT_STAGNANT_HOURS  = 6    # 4A: cut stagnant position after 6h
-TIME_EXIT_LOSING_HOURS    = 4    # 4D: cut losing position after 4h
-TIME_EXIT_MIN_MOVE_PCT    = 0.005 # 4A threshold: |move| < 0.5% = stagnant
-TIME_EXIT_EXTENDED_HOURS  = 12   # 4B: exit stuck-profitable after 12h
-TIME_EXIT_TRAIL_HOURS     = 4    # 4C: close trailing half 4h after Tier 1 if not moved
+# 4A  Stagnant : hours_held >= TIME_EXIT_STAGNANT_HOURS  AND |move| < 0.5%
+# 4D  Losing   : hours_held >= TIME_EXIT_LOSING_HOURS    AND move < 0%
+# 4B  Stuck+   : hours_held >= TIME_EXIT_EXTENDED_HOURS  AND 0 < move < TP
+# 4C  Trail TO : Tier 1 fired AND hours_held >= TIME_EXIT_TRAIL_HOURS
+#
+# Stagnant hours is regime-aware: in a bull market we cut dead positions faster
+# (3h) because good money should be redeployed into active moves.
+# In neutral/bear we give 6h since fewer alternatives are available.
+
+TIME_EXIT_STAGNANT_HOURS      = 6    # 4A: default (neutral/bear)
+TIME_EXIT_STAGNANT_HOURS_BULL = 3    # 4A: in BTC LONG regime — cut faster, redeploy
+TIME_EXIT_LOSING_HOURS        = 4    # 4D: cut losing position after 4h (bull)
+TIME_EXIT_LOSING_HOURS_BEAR   = 2    # 4D: cut losing position after 2h (neutral/bear)
+TIME_EXIT_MIN_MOVE_PCT        = 0.003 # 4A threshold: |move| < 0.3% = stagnant (was 0.5%)
+TIME_EXIT_EXTENDED_HOURS      = 12   # 4B: exit stuck-profitable after 12h
+TIME_EXIT_TRAIL_HOURS         = 4    # 4C: close trailing half 4h after Tier 1 if not moved
 
 # ---------------------------------------------------------------------------
 # RSI reset thresholds — re-entry filter after losing trades
@@ -205,6 +232,12 @@ COUNTER_TREND_TRAIL_PCT = 0.010   # tighter trail for bear-market bounces
 # Set to 2 — requires two independent confirmations.
 
 LONG_SOFT_REQUIRED = 2
+
+# Minimum soft score required for counter-trend entries.
+# CT trades are below EMA200 — they need stronger confirmation than trend entries
+# to compensate for trading against the macro direction.
+# Set higher than LONG_SOFT_REQUIRED to filter out the weakest CT signals.
+CT_SOFT_REQUIRED = 3   # CT entries need 3/4 vs 2/4 for trend entries
 
 # ---------------------------------------------------------------------------
 # BTC regime override — high-conviction independent LONGs
@@ -331,3 +364,32 @@ SIGNAL_EXIT_THRESHOLD     = 1    # exit if score drops to 1 or below (was 2+ at 
 # Counter-trend trades always use COUNTER_TREND_TRAIL_PCT (1%) regardless.
 
 BULL_TRAILING_STOP_PCT = 0.030   # 3% trail when BTC regime is LONG
+
+# ---------------------------------------------------------------------------
+# Regime flip emergency exit
+# ---------------------------------------------------------------------------
+# When BTC regime transitions from LONG → SHORT, positions held in high-corr
+# coins that are currently losing or flat are exited immediately rather than
+# waiting for individual tier exits. Profitable positions with active trailing
+# stops are left to trail out naturally.
+#
+# Correlation threshold for emergency exit on regime flip:
+#   corr > REGIME_FLIP_EXIT_CORR  → exit immediately if losing or flat
+#   corr <= REGIME_FLIP_EXIT_CORR → let individual tiers handle it (coin is independent)
+REGIME_FLIP_EXIT       = True    # enable emergency exit on LONG→SHORT flip
+REGIME_FLIP_EXIT_CORR  = 0.65   # coins with corr above this get force-exited on flip
+# Previous regime is stored per-run to detect transitions.
+# Written to data/btc_regime_prev.txt each run.
+
+# ---------------------------------------------------------------------------
+# CT entries in BTC SHORT regime — correlation-gated block
+# ---------------------------------------------------------------------------
+# Counter-trend entries (below own EMA200) in a BTC SHORT regime are blocked
+# for coins that closely track BTC. These coins move with BTC — buying a bounce
+# when BTC is falling is like trying to catch a falling knife.
+#
+# Low-corr coins (DENT, FTM, MANA etc.) are genuinely independent and can still
+# CT-enter in BTC SHORT based on their own signal strength.
+#
+# Coins with corr > CT_BLOCK_CORR_IN_SHORT cannot open CT positions in BTC SHORT.
+CT_BLOCK_CORR_IN_SHORT = 0.65   # block CT entries for corr > this in BTC SHORT

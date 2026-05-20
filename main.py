@@ -6,11 +6,14 @@ from datetime import datetime, timedelta, timezone
 from config import (
     TRADING_MODE,
     COINS, DATA_DIR, INITIAL_CAPITAL, RISK_PER_TRADE, STOP_LOSS_PCT,
-    MAX_ALLOCATION, MAX_POSITIONS_PER_DIR,
+    RISK_PER_TRADE_HIGH, RISK_PER_TRADE_LOW,
+    MAX_ALLOCATION, MAX_POSITIONS_PER_DIR, MAX_POSITIONS_BULL, MAX_POSITIONS_BEAR,
     PARTIAL_TAKE_PROFIT_PCT, PARTIAL_EXIT_RATIO,
     TRAILING_STOP_PCT,
     COUNTER_TREND_TP_PCT, COUNTER_TREND_TRAIL_PCT,
-    TIME_EXIT_STAGNANT_HOURS, TIME_EXIT_LOSING_HOURS, TIME_EXIT_MIN_MOVE_PCT,
+    TIME_EXIT_STAGNANT_HOURS, TIME_EXIT_STAGNANT_HOURS_BULL,
+    TIME_EXIT_LOSING_HOURS, TIME_EXIT_LOSING_HOURS_BEAR,
+    TIME_EXIT_MIN_MOVE_PCT,
     TIME_EXIT_EXTENDED_HOURS, TIME_EXIT_TRAIL_HOURS,
     RSI_RESET_SHORT, RSI_RESET_LONG,
     LONG_ONLY, REGIME_ALLOWS_LONG_IN_NEUTRAL, REGIME_OVERRIDE_MIN_SCORE,
@@ -18,6 +21,9 @@ from config import (
     BULL_TRAILING_STOP_PCT,
     REGIME_OVERRIDE_MAX_CORR, COIN_BTC_CORR,
     SIGNAL_DETERIORATION_EXIT, SIGNAL_EXIT_THRESHOLD,
+    LONG_SOFT_REQUIRED, CT_SOFT_REQUIRED,
+    REGIME_FLIP_EXIT, REGIME_FLIP_EXIT_CORR,
+    CT_BLOCK_CORR_IN_SHORT,
 )
 from strategy import (apply_indicators, generate_signal,
                       confirm_15min_momentum, get_4h_direction, check_15min_ct_exit)
@@ -146,6 +152,15 @@ def count_open_by_direction() -> dict:
         if p is not None and p['Side'] in counts:
             counts[p['Side']] += 1
     return counts
+
+
+def effective_max_positions(btc_regime: str | None) -> int:
+    """Return regime-aware max open positions per direction."""
+    if btc_regime == "LONG":
+        return MAX_POSITIONS_BULL
+    if btc_regime == "SHORT":
+        return MAX_POSITIONS_BEAR
+    return MAX_POSITIONS_PER_DIR   # NEUTRAL
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +413,79 @@ if VERBOSE_DIAG and btc_breakdown:
     print(f"  ADX         : {bd['adx']:.2f}  |  RSI={bd['rsi']:.2f}  |  ATR={bd['atr']:.2f}  |  ATR_SMA={bd['atr_sma']:.2f}")
     print(f"  ST_Upper    : {bd['st_upper']:.2f}  |  ST_Lower={bd['st_lower']:.2f}")
 print()
+
+# ---------------------------------------------------------------------------
+# Regime flip detection — emergency exit on LONG → SHORT transition
+# ---------------------------------------------------------------------------
+_regime_prev_file = f"{DATA_DIR}/btc_regime_prev.txt"
+
+def _load_prev_regime() -> str | None:
+    if os.path.exists(_regime_prev_file):
+        with open(_regime_prev_file) as f:
+            val = f.read().strip()
+            return val if val in ("LONG", "SHORT") else None
+    return None
+
+def _save_prev_regime(regime: str | None) -> None:
+    with open(_regime_prev_file, "w") as f:
+        f.write(regime or "NEUTRAL")
+
+prev_regime = _load_prev_regime()
+regime_flipped_to_bear = (prev_regime == "LONG" and btc_regime == "SHORT")
+
+if REGIME_FLIP_EXIT and regime_flipped_to_bear:
+    print("=" * 50)
+    print("⚠️  REGIME FLIP: LONG → SHORT — running emergency exit check")
+    print("=" * 50)
+    for _sym in COINS:
+        _pos = load_position(_sym)
+        if _pos is None:
+            continue
+        _corr = COIN_BTC_CORR.get(_sym, 1.0)
+        if _corr <= REGIME_FLIP_EXIT_CORR:
+            print(f"  {_sym}: corr={_corr:.2f} ≤ {REGIME_FLIP_EXIT_CORR} — independent coin, skipping emergency exit")
+            continue
+        _df = coins_data.get(_sym)
+        _latest = float(_df["Close"].iloc[-1]) if _df is not None else float(_pos["Entry Price"])
+        _entry  = float(_pos["Entry Price"])
+        _qty    = float(_pos["Quantity"])
+        _side   = _pos["Side"]
+        _move   = (_latest - _entry) / _entry if _side == "LONG" else (_entry - _latest) / _entry
+        _partial = bool(int(_pos.get("Partial_Taken", 0)))
+
+        # Exit if: losing, flat (< +0.5%), or counter-trend — regardless of partial status
+        # Leave profitable trend positions with active trailing stop to trail out
+        _should_exit = _move < 0.005 or bool(int(_pos.get("Counter_Trend", 0)))
+        if _partial and _move >= 0.005:
+            _should_exit = False  # profitable with trailing stop active — let it trail
+
+        if _should_exit:
+            _pnl = _move * _entry * _qty
+            print(f"  🚨 {_sym}: regime flip exit | corr={_corr:.2f} | move={_move:.2%} | PnL: {_pnl:.2f}")
+            realized_pnl    += _pnl
+            total_trades    += 1
+            trades_this_run += 1
+            cash            += _entry * _qty + _pnl
+            log_trade(_sym, {
+                "Coin":        _sym,
+                "Side":        _side,
+                "Entry Price": _entry,
+                "Exit Price":  _latest,
+                "Quantity":    _qty,
+                "PnL":         round(_pnl, 4),
+                "Exit Reason": "REGIME_FLIP_EXIT",
+                "Exit Time":   datetime.now(timezone.utc),
+            })
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(_sym, "sell", _qty)
+            clear_position(_sym)
+        else:
+            print(f"  ✅ {_sym}: profitable trend position (move={_move:.2%}) — letting trail exit handle it")
+    dir_counts_cache = count_open_by_direction()
+    print()
+
+_save_prev_regime(btc_regime)
 
 # ------------------------------------------------------------------
 # ------------------------------------------------------------------
@@ -827,13 +915,20 @@ for symbol in COINS:
         tier4_exit   = False
         tier4_reason = ""
 
-        # 4A — stagnant: no meaningful move after TIME_EXIT_STAGNANT_HOURS
-        if not tier4_exit and hours_held >= TIME_EXIT_STAGNANT_HOURS                 and abs(move_pct) < TIME_EXIT_MIN_MOVE_PCT:
+        # Regime-aware time exit thresholds
+        _stagnant_hours = TIME_EXIT_STAGNANT_HOURS_BULL if btc_regime == "LONG" else TIME_EXIT_STAGNANT_HOURS
+        _losing_hours   = TIME_EXIT_LOSING_HOURS_BEAR   if btc_regime != "LONG" else TIME_EXIT_LOSING_HOURS
+
+        # 4A — stagnant: no meaningful move after _stagnant_hours (regime-aware)
+        if not tier4_exit and hours_held >= _stagnant_hours \
+                and abs(move_pct) < TIME_EXIT_MIN_MOVE_PCT:
             tier4_exit   = True
             tier4_reason = f"TIME_EXIT_STAGNANT ({hours_held:.1f}h, move={move_pct:.2%})"
 
-        # 4D — losing: thesis failed, cut early
-        if not tier4_exit and not already_partial                 and hours_held >= TIME_EXIT_LOSING_HOURS                 and move_pct < 0:
+        # 4D — losing: thesis failed, cut early (faster in non-bull regime)
+        if not tier4_exit and not already_partial \
+                and hours_held >= _losing_hours \
+                and move_pct < 0:
             tier4_exit   = True
             tier4_reason = f"TIME_EXIT_LOSING ({hours_held:.1f}h, move={move_pct:.2%})"
 
@@ -946,8 +1041,28 @@ for symbol in COINS:
                     continue
 
         # Passed gates 1, 1.5, 2 — add to ranked candidate pool
-        score = signal_data.get('soft_confirmations', 0)
-        adx   = float(signal_data.get('adx', 0))
+        score    = signal_data.get('soft_confirmations', 0)
+        adx      = float(signal_data.get('adx', 0))
+        is_ct    = signal_data.get('counter_trend', False) or _4h_ct
+        coin_corr = COIN_BTC_CORR.get(symbol, 1.0)
+
+        # Gate 2.5: CT minimum score filter
+        # Counter-trend entries need higher confirmation than trend entries.
+        # Below EMA200 + weak score = too risky. Filter before queuing.
+        if is_ct and score < CT_SOFT_REQUIRED:
+            print(f"  🚫 CT score too low — score={score}/4 < {CT_SOFT_REQUIRED} required for counter-trend. Blocked.")
+            print()
+            continue
+
+        # Gate 2.6: CT-in-SHORT correlation block
+        # Counter-trend entries for high-corr coins in BTC SHORT regime are
+        # knife-catching. Low-corr coins (DENT, FTM etc.) can still CT-enter.
+        if is_ct and btc_regime == "SHORT" and coin_corr > CT_BLOCK_CORR_IN_SHORT:
+            print(f"  🚫 CT entry blocked — BTC SHORT regime + corr={coin_corr:.2f} > {CT_BLOCK_CORR_IN_SHORT}. "
+                  f"Too correlated to BTC to bounce-trade in bear market.")
+            print()
+            continue
+
         print(f"  📋 Candidate queued — score={score}/4  ADX={adx:.1f}  "
               f"(will rank against other candidates before entering)")
         entry_candidates.append((symbol, signal_data, df))
@@ -1000,16 +1115,29 @@ if entry_candidates:
 
         print(f"--- {symbol} (ranked entry) ---")
 
-        # Gate 3: position count — checked here so ranking takes effect
-        dir_counts = dir_counts_cache
-        if dir_counts[signal_dir] >= MAX_POSITIONS_PER_DIR:
+        # Gate 3: position count — regime-aware max, checked here so ranking takes effect
+        dir_counts  = dir_counts_cache
+        _max_pos    = effective_max_positions(btc_regime)
+        if dir_counts[signal_dir] >= _max_pos:
             print(f"  🚫 Correlation guard — already {dir_counts[signal_dir]} "
-                  f"{signal_dir}(s) open (max={MAX_POSITIONS_PER_DIR}). Blocked.")
+                  f"{signal_dir}(s) open (max={_max_pos} in {btc_regime or 'NEUTRAL'} regime). Blocked.")
             print()
             continue
 
+        # Score-based allocation: higher conviction = more capital
+        #   4/4 → 10%  (RISK_PER_TRADE_HIGH)
+        #   3/4 → 8%   (RISK_PER_TRADE)
+        #   2/4 → 5%   (RISK_PER_TRADE_LOW)
+        _score = signal_data.get('soft_confirmations', 0)
+        if _score >= 4:
+            _risk_rate = RISK_PER_TRADE_HIGH
+        elif _score <= 2:
+            _risk_rate = RISK_PER_TRADE_LOW
+        else:
+            _risk_rate = RISK_PER_TRADE
+
         # Capital guard
-        allocation = cash * RISK_PER_TRADE
+        allocation = cash * _risk_rate
         total_capital = cash + sum(
             float(load_position(s)['Entry Price']) * float(load_position(s)['Quantity'])
             for s in COINS if load_position(s) is not None
@@ -1032,8 +1160,19 @@ if entry_candidates:
         # Verifies that intra-bar momentum is still alive in the signal direction
         # before committing. Prevents buying at the top of a 1H rally that has
         # already peaked before our entry bar.
+        #
+        # Exception: 4/4 score signals bypass this gate even if 15-min RSI is flat.
+        # All four 1H conditions agree — a one-bar RSI stall shouldn't block the
+        # strongest signals. RSI must still be >= 50 (not falling into bearish).
         if CONFIRM_15MIN:
+            _entry_score = signal_data.get('soft_confirmations', 0)
             mom_ok, mom_reason = confirm_15min_momentum(symbol, signal_dir)
+            if not mom_ok and _entry_score >= 4:
+                # Check if failure was only due to RSI flat (not falling), not too low
+                _bypass = "flat" in mom_reason.lower() or "falling" in mom_reason.lower()
+                if _bypass and "too low" not in mom_reason.lower():
+                    mom_ok = True
+                    mom_reason = mom_reason + " [bypassed — 4/4 signal]"
             if VERBOSE_DIAG or not mom_ok:
                 print(f"  [15min] {mom_reason}")
             if not mom_ok:
@@ -1083,7 +1222,7 @@ if entry_candidates:
         trades_this_run += 1
 
         print(f"  ✅ Entered {signal_dir} @ {latest_price:.4f}")
-        print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f}")
+        print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f} | Risk={_risk_rate:.0%} (score={_score}/4)")
         mode_label = "LONG-only" if LONG_ONLY else "LONG+SHORT"
         ct_label   = " | ⚠️  COUNTER-TREND (tighter exits)" if signal_data.get('counter_trend') else ""
         print(f"     ADX={signal_data['adx']:.1f} | RSI={signal_data['rsi']:.1f} | "
