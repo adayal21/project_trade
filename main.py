@@ -366,7 +366,6 @@ print("=" * 50)
 
 coins_data = {}
 for symbol in COINS:
-    print(f"\nFetching {symbol}")
     df = fetch_data(symbol)
     if len(df) < 200:   # EMA200 needs 200 bars of warm-up
         print(f"  Not enough data ({len(df)} bars), skipping.")
@@ -422,8 +421,6 @@ dir_counts_cache = count_open_by_direction()
 entry_candidates = []   # list of (symbol, signal_data, df) to rank and enter
 
 for symbol in COINS:
-    print(f"--- {symbol} ---")
-
     if symbol not in coins_data:
         print(f"  Skipped (no data).\n")
         continue
@@ -459,6 +456,10 @@ for symbol in COINS:
     # ------------------------------------------------------------------
     _row = df.iloc[-1]
     _atr_ratio = (_row["ATR"] / _row["ATR_SMA"]) if _row["ATR_SMA"] > 0 else 0
+    # Print coin header only when there is something to report
+    if position is not None or signal_data is not None:
+        print(f"--- {symbol} ---")
+
     if VERBOSE_DIAG:
         print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}  "
               f"Close>EMA200={latest_price > _row['EMA200']}")
@@ -950,13 +951,12 @@ for symbol in COINS:
         # Queued as candidate — entry handled in Step 3B ranked pass.
         pass
 
-    elif signal_dir is None and position is None:
-        print(f"  No signal.")
-
     elif position is not None and signal_dir == position['Side']:
         print(f"  Holding {position['Side']} (signal agrees, no action).")
 
-    print()
+    # Only add blank line if header was printed
+    if position is not None or signal_data is not None:
+        print()
 
 # ---------------------------------------------------------------------------
 # Step 3B: Ranked entry — enter best candidates first
