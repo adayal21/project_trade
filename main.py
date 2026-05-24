@@ -9,6 +9,8 @@ from config import (
     RISK_PER_TRADE_HIGH, RISK_PER_TRADE_LOW,
     MAX_ALLOCATION, MAX_POSITIONS_PER_DIR, MAX_POSITIONS_BULL, MAX_POSITIONS_BEAR,
     PARTIAL_TAKE_PROFIT_PCT, PARTIAL_EXIT_RATIO,
+    PARTIAL_TP_1A_PCT, PARTIAL_TP_1B_PCT,
+    PARTIAL_EXIT_RATIO_1A, PARTIAL_EXIT_RATIO_1B,
     TRAILING_STOP_PCT,
     COUNTER_TREND_TP_PCT, COUNTER_TREND_TRAIL_PCT,
     TIME_EXIT_STAGNANT_HOURS, TIME_EXIT_STAGNANT_HOURS_BULL,
@@ -24,6 +26,7 @@ from config import (
     LONG_SOFT_REQUIRED, CT_SOFT_REQUIRED,
     REGIME_FLIP_EXIT, REGIME_FLIP_EXIT_CORR,
     CT_BLOCK_CORR_IN_SHORT,
+    USE_4H_HARD_GATE,
 )
 from strategy import (apply_indicators, generate_signal,
                       confirm_15min_momentum, get_4h_direction, check_15min_ct_exit)
@@ -369,6 +372,7 @@ else:
     total_trades = state['total_trades']
 
 trades_this_run = 0
+run_events      = []   # human-readable event strings collected each run for portfolio.csv
 
 # ------------------------------------------------------------------
 # Step 1: Fetch + apply indicators for ALL coins upfront.
@@ -462,6 +466,7 @@ if REGIME_FLIP_EXIT and regime_flipped_to_bear:
         if _should_exit:
             _pnl = _move * _entry * _qty
             print(f"  🚨 {_sym}: regime flip exit | corr={_corr:.2f} | move={_move:.2%} | PnL: {_pnl:.2f}")
+            run_events.append(f"{_sym} {_pnl:+.2f} REGIME_FLIP")
             realized_pnl    += _pnl
             total_trades    += 1
             trades_this_run += 1
@@ -596,6 +601,7 @@ for symbol in COINS:
         if move_pct <= -STOP_LOSS_PCT:
             pnl = move_pct * entry_price * quantity
             print(f"  ⛔ STOP-LOSS hit ({move_pct:.2%}) | PnL: {pnl:.2f}")
+            run_events.append(f"{symbol} {pnl:+.2f} STOP_LOSS")
 
             realized_pnl    += pnl
             total_trades    += 1
@@ -622,64 +628,176 @@ for symbol in COINS:
             position = None
 
     # -------------------------------------------------------------------
-    # Tier 1 — Partial profit-taking at +PARTIAL_TAKE_PROFIT_PCT
-    # Closes PARTIAL_EXIT_RATIO of the position, banks that cash,
-    # and marks the position as partially exited so Tier 2 can activate.
+    # Tier 1 — Two-stage partial profit-taking
+    # -------------------------------------------------------------------
+    # Stage 1A: at +2% → close 25% of original position (locks small profit)
+    # Stage 1B: at +3% → close another 25% (matches original partial behaviour)
+    # Trail half (50%) activates AFTER Tier 1B fires.
+    #
+    # Counter-trend trades skip Tier 1A and use a single partial at CT TP (1.5%)
+    # on 50% of position — bounces don't have room for two-stage scale-out.
+    # The legacy effective_tp variable still drives the CT path.
     # -------------------------------------------------------------------
     if position is not None:
         side             = position['Side']
         entry_price      = float(position['Entry Price'])
         quantity         = float(position['Quantity'])
-        already_partial  = bool(int(position.get('Partial_Taken', 0)))
+        already_partial  = bool(int(position.get('Partial_Taken', 0)))    # = Tier 1B fired
+        tier1a_taken     = bool(int(position.get('Tier1A_Taken', 0)))
+        orig_qty         = float(position.get('Original_Qty', quantity))  # for ratio calc
 
         move_pct = (
             (latest_price - entry_price) / entry_price if side == "LONG"
             else (entry_price - latest_price) / entry_price
         )
 
-        if not already_partial and move_pct >= effective_tp:
-            exit_qty      = quantity * PARTIAL_EXIT_RATIO
-            remain_qty    = quantity - exit_qty
-            partial_pnl   = move_pct * entry_price * exit_qty
+        # ---------- CT path (single partial at +1.5%) ----------
+        if is_counter_trend:
+            if not already_partial and move_pct >= effective_tp:
+                exit_qty    = quantity * PARTIAL_EXIT_RATIO   # 50% of current = 50% of orig
+                remain_qty  = quantity - exit_qty
+                partial_pnl = move_pct * entry_price * exit_qty
 
-            realized_pnl    += partial_pnl
-            total_trades    += 1
-            trades_this_run += 1
-            cash            += entry_price * exit_qty + partial_pnl
+                realized_pnl    += partial_pnl
+                total_trades    += 1
+                trades_this_run += 1
+                cash            += entry_price * exit_qty + partial_pnl
 
-            print(f"  💰 TIER 1 partial exit ({move_pct:.2%} gain) | "
-                  f"Closed {PARTIAL_EXIT_RATIO:.0%} @ {latest_price:.4f} | "
-                  f"PnL: +{partial_pnl:.2f} | Remaining qty: {remain_qty:.6f}")
+                run_events.append(f"{symbol} {partial_pnl:+.2f} PARTIAL_CT")
+                print(f"  💰 TIER 1 partial exit (CT, {move_pct:.2%} gain) | "
+                      f"Closed {PARTIAL_EXIT_RATIO:.0%} @ {latest_price:.4f} | "
+                      f"PnL: +{partial_pnl:.2f} | Remaining qty: {remain_qty:.6f}")
 
-            log_trade(symbol, {
-                "Coin":        symbol,
-                "Side":        side,
-                "Entry Price": entry_price,
-                "Exit Price":  latest_price,
-                "Quantity":    exit_qty,
-                "PnL":         round(partial_pnl, 4),
-                "Exit Reason": "PARTIAL_PROFIT",
-                "Exit Time":   datetime.now(timezone.utc)
-            })
+                log_trade(symbol, {
+                    "Coin":        symbol,
+                    "Side":        side,
+                    "Entry Price": entry_price,
+                    "Exit Price":  latest_price,
+                    "Quantity":    exit_qty,
+                    "PnL":         round(partial_pnl, 4),
+                    "Exit Reason": "PARTIAL_PROFIT",
+                    "Exit Time":   datetime.now(timezone.utc)
+                })
 
-            # Live mode: sell the partial exit quantity
-            if TRADING_MODE == "live":
-                from exchange import place_market_order
-                place_market_order(symbol, "sell", exit_qty)
+                if TRADING_MODE == "live":
+                    from exchange import place_market_order
+                    place_market_order(symbol, "sell", exit_qty)
 
-            # Update the position: smaller quantity, Tier 1 done,
-            # seed the trailing high-water mark at current price
-            save_position(symbol, {
-                "Coin":          symbol,
-                "Side":          side,
-                "Entry Price":   entry_price,
-                "Quantity":      remain_qty,
-                "Timestamp":     position['Timestamp'],
-                "Partial_Taken": 1,
-                "Trail_HWM":     latest_price,   # Tier 2 starts tracking from here
-                "Bars_Held":     int(position.get('Bars_Held', 0)),
-            })
-            position = load_position(symbol)   # reload updated state
+                save_position(symbol, {
+                    "Coin":          symbol,
+                    "Side":          side,
+                    "Entry Price":   entry_price,
+                    "Quantity":      remain_qty,
+                    "Timestamp":     position['Timestamp'],
+                    "Partial_Taken": 1,
+                    "Tier1A_Taken":  1,  # collapsed for CT (no separate 1A stage)
+                    "Original_Qty":  orig_qty,
+                    "Trail_HWM":     latest_price,
+                    "Bars_Held":     int(position.get('Bars_Held', 0)),
+                    "Counter_Trend": int(position.get('Counter_Trend', 0)),
+                })
+                position = load_position(symbol)
+
+        # ---------- Trend path (two stages: +2% then +3%) ----------
+        else:
+            # Stage 1A: +2% — close 25% of ORIGINAL quantity
+            if not tier1a_taken and move_pct >= PARTIAL_TP_1A_PCT:
+                exit_qty    = orig_qty * PARTIAL_EXIT_RATIO_1A
+                if exit_qty > quantity:    # safety
+                    exit_qty = quantity
+                remain_qty  = quantity - exit_qty
+                partial_pnl = move_pct * entry_price * exit_qty
+
+                realized_pnl    += partial_pnl
+                total_trades    += 1
+                trades_this_run += 1
+                cash            += entry_price * exit_qty + partial_pnl
+
+                run_events.append(f"{symbol} {partial_pnl:+.2f} PARTIAL_1A")
+                print(f"  💰 TIER 1A partial exit ({move_pct:.2%} gain) | "
+                      f"Closed {PARTIAL_EXIT_RATIO_1A:.0%} of original @ {latest_price:.4f} | "
+                      f"PnL: +{partial_pnl:.2f} | Remaining qty: {remain_qty:.6f}")
+
+                log_trade(symbol, {
+                    "Coin":        symbol,
+                    "Side":        side,
+                    "Entry Price": entry_price,
+                    "Exit Price":  latest_price,
+                    "Quantity":    exit_qty,
+                    "PnL":         round(partial_pnl, 4),
+                    "Exit Reason": "PARTIAL_PROFIT_1A",
+                    "Exit Time":   datetime.now(timezone.utc)
+                })
+
+                if TRADING_MODE == "live":
+                    from exchange import place_market_order
+                    place_market_order(symbol, "sell", exit_qty)
+
+                save_position(symbol, {
+                    "Coin":          symbol,
+                    "Side":          side,
+                    "Entry Price":   entry_price,
+                    "Quantity":      remain_qty,
+                    "Timestamp":     position['Timestamp'],
+                    "Partial_Taken": 0,           # Tier 1B not yet, trail not active
+                    "Tier1A_Taken":  1,
+                    "Original_Qty":  orig_qty,
+                    "Trail_HWM":     latest_price,   # seed HWM at 1A price
+                    "Bars_Held":     int(position.get('Bars_Held', 0)),
+                    "Counter_Trend": int(position.get('Counter_Trend', 0)),
+                })
+                position = load_position(symbol)
+                # refresh local vars after reload
+                quantity        = float(position['Quantity'])
+                tier1a_taken    = True
+
+            # Stage 1B: +3% — close another 25% of ORIGINAL quantity, activate trail
+            if not already_partial and move_pct >= PARTIAL_TP_1B_PCT:
+                exit_qty    = orig_qty * PARTIAL_EXIT_RATIO_1B
+                if exit_qty > quantity:    # safety
+                    exit_qty = quantity
+                remain_qty  = quantity - exit_qty
+                partial_pnl = move_pct * entry_price * exit_qty
+
+                realized_pnl    += partial_pnl
+                total_trades    += 1
+                trades_this_run += 1
+                cash            += entry_price * exit_qty + partial_pnl
+
+                run_events.append(f"{symbol} {partial_pnl:+.2f} PARTIAL_1B")
+                print(f"  💰 TIER 1B partial exit ({move_pct:.2%} gain) | "
+                      f"Closed {PARTIAL_EXIT_RATIO_1B:.0%} of original @ {latest_price:.4f} | "
+                      f"PnL: +{partial_pnl:.2f} | Remaining qty: {remain_qty:.6f}")
+
+                log_trade(symbol, {
+                    "Coin":        symbol,
+                    "Side":        side,
+                    "Entry Price": entry_price,
+                    "Exit Price":  latest_price,
+                    "Quantity":    exit_qty,
+                    "PnL":         round(partial_pnl, 4),
+                    "Exit Reason": "PARTIAL_PROFIT",   # legacy reason kept for trail half
+                    "Exit Time":   datetime.now(timezone.utc)
+                })
+
+                if TRADING_MODE == "live":
+                    from exchange import place_market_order
+                    place_market_order(symbol, "sell", exit_qty)
+
+                save_position(symbol, {
+                    "Coin":          symbol,
+                    "Side":          side,
+                    "Entry Price":   entry_price,
+                    "Quantity":      remain_qty,
+                    "Timestamp":     position['Timestamp'],
+                    "Partial_Taken": 1,        # trail now active
+                    "Tier1A_Taken":  1,
+                    "Original_Qty":  orig_qty,
+                    "Trail_HWM":     latest_price,   # re-seed HWM at 1B price
+                    "Bars_Held":     int(position.get('Bars_Held', 0)),
+                    "Counter_Trend": int(position.get('Counter_Trend', 0)),
+                })
+                position = load_position(symbol)
 
     # -------------------------------------------------------------------
     # Tier 2 — Trailing stop on the remaining position
@@ -711,8 +829,11 @@ for symbol in COINS:
                 "Quantity":      quantity,
                 "Timestamp":     position['Timestamp'],
                 "Partial_Taken": 1,
+                "Tier1A_Taken":  int(position.get('Tier1A_Taken', 1)),
+                "Original_Qty":  float(position.get('Original_Qty', quantity)),
                 "Trail_HWM":     hwm,
                 "Bars_Held":     int(position.get('Bars_Held', 0)),
+                "Counter_Trend": int(position.get('Counter_Trend', 0)),
             })
             position = load_position(symbol)
 
@@ -728,6 +849,7 @@ for symbol in COINS:
                 trades_this_run += 1
                 cash            += entry_price * quantity + pnl
 
+                run_events.append(f"{symbol} {pnl:+.2f} TRAIL_STOP")
                 print(f"  🔔 TIER 2 trailing stop hit | HWM={hwm:.4f} | "
                       f"Price={latest_price:.4f} | PnL: {pnl:.2f}")
 
@@ -771,6 +893,7 @@ for symbol in COINS:
             trades_this_run += 1
             cash            += entry_price * quantity + pnl
 
+            run_events.append(f"{symbol} {pnl:+.2f} COUNTER_SIGNAL")
             print(f"  🔁 Counter-signal exit | PnL: {pnl:.2f}")
 
             log_trade(symbol, {
@@ -818,6 +941,7 @@ for symbol in COINS:
             s2 = signal_data.get('s2_volume', False)
             s3 = signal_data.get('s3_ema200', False)
             s4 = signal_data.get('s4_ema50', False)
+            run_events.append(f"{symbol} {pnl:+.2f} SIG_DETN")
             print(f"  📉 SIGNAL DETERIORATION exit — score dropped to {current_score}/4 "
                   f"(RSI={s1} Vol={s2} EMA200={s3} EMA50={s4}) | PnL: {pnl:.2f}")
 
@@ -864,6 +988,7 @@ for symbol in COINS:
                 trades_this_run += 1
                 cash            += entry_price * quantity + pnl
 
+                run_events.append(f"{symbol} {pnl:+.2f} CT_EXIT")
                 print(f"  ⚡ CT EARLY EXIT — bounce reversing | PnL: {pnl:.2f}")
                 log_trade(symbol, {
                     "Coin":        symbol,
@@ -950,6 +1075,7 @@ for symbol in COINS:
             trades_this_run += 1
             cash            += entry_price * quantity + pnl
 
+            run_events.append(f"{symbol} {pnl:+.2f} {tier4_reason.split("(")[0].strip()}")
             print(f"  ⏱️  TIER 4 exit | {tier4_reason} | PnL: {pnl:.2f}")
 
             log_trade(symbol, {
@@ -979,6 +1105,8 @@ for symbol in COINS:
                 "Quantity":      quantity,
                 "Timestamp":     position['Timestamp'],
                 "Partial_Taken": int(position.get('Partial_Taken', 0)),
+                "Tier1A_Taken":  int(position.get('Tier1A_Taken', 0)),
+                "Original_Qty":  float(position.get('Original_Qty', quantity)),
                 "Trail_HWM":     float(position.get('Trail_HWM', entry_price)),
                 "Bars_Held":     bars_held,
                 "Counter_Trend": int(position.get('Counter_Trend', 0)),
@@ -1045,6 +1173,18 @@ for symbol in COINS:
         adx      = float(signal_data.get('adx', 0))
         is_ct    = signal_data.get('counter_trend', False) or _4h_ct
         coin_corr = COIN_BTC_CORR.get(symbol, 1.0)
+
+        # Gate 2.4: 4H hard direction gate
+        # If 4H Supertrend on the coin is BEAR, block entry entirely.
+        # The 4H reflects the coin's actual multi-hour structure — bouncing
+        # bullish on 1H while 4H is decisively bearish is fighting the trend.
+        # This replaces the old CT-flag-only behaviour for 4H BEAR.
+        # BTC/INR itself is exempt (we use BTC's own regime separately).
+        if USE_4H_HARD_GATE and symbol != "BTC/INR" and _4h_dir == "BEAR":
+            print(f"  🚫 4H direction is BEAR on {symbol} — entry blocked "
+                  f"(1H bounce inside multi-hour downtrend).")
+            print()
+            continue
 
         # Gate 2.5: CT minimum score filter
         # Counter-trend entries need higher confirmation than trend entries.
@@ -1211,6 +1351,8 @@ if entry_candidates:
             "Quantity":      quantity,
             "Timestamp":     datetime.now(timezone.utc),
             "Partial_Taken": 0,
+            "Tier1A_Taken":  0,
+            "Original_Qty":  quantity,
             "Trail_HWM":     latest_price,
             "Bars_Held":     0,
             "Counter_Trend": int(is_ct),
@@ -1221,6 +1363,7 @@ if entry_candidates:
         total_trades += 1
         trades_this_run += 1
 
+        run_events.append(f"{symbol} ENTRY {signal_dir}")
         print(f"  ✅ Entered {signal_dir} @ {latest_price:.4f}")
         print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f} | Risk={_risk_rate:.0%} (score={_score}/4)")
         mode_label = "LONG-only" if LONG_ONLY else "LONG+SHORT"
@@ -1263,7 +1406,7 @@ for symbol in COINS:
 
 equity = cash + unrealized
 
-log_portfolio(cash, equity, open_positions, realized_pnl, unrealized, total_trades)
+log_portfolio(cash, equity, open_positions, realized_pnl, unrealized, total_trades, run_events)
 
 print("=" * 50)
 print("Portfolio Snapshot")

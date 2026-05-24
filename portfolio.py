@@ -18,9 +18,9 @@ def initialize_portfolio():
             "Open Positions": 0,
             "Realized PnL": 0,
             "Unrealized PnL": 0,
-            "Total Trades": 0
+            "Total Trades": 0,
+            "Events": ""
         }])
-
         df.to_csv(portfolio_file, index=False)
 
 
@@ -30,18 +30,24 @@ def log_portfolio(
     open_positions,
     realized_pnl,
     unrealized_pnl,
-    total_trades
+    total_trades,
+    events=None        # list of strings describing what happened this run
 ):
     df = pd.read_csv(portfolio_file)
 
+    # Build a readable summary of this run's events.
+    # e.g. "NEAR +14.22 PARTIAL | FIL -9.54 T4D_LOSING | BTC LONG entry"
+    events_str = " | ".join(events) if events else ""
+
     new_row = {
-        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Cash": round(cash, 2),
-        "Equity": round(equity, 2),
+        "Timestamp":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Cash":           round(cash, 2),
+        "Equity":         round(equity, 2),
         "Open Positions": open_positions,
-        "Realized PnL": round(realized_pnl, 2),
+        "Realized PnL":   round(realized_pnl, 2),
         "Unrealized PnL": round(unrealized_pnl, 2),
-        "Total Trades": total_trades
+        "Total Trades":   total_trades,
+        "Events":         events_str
     }
 
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
