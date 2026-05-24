@@ -35,50 +35,43 @@ if TRADING_MODE == "live":
 else:
     INITIAL_CAPITAL = 10000
 
+# ---------------------------------------------------------------------------
+# Coin universe — data-driven selection from 2-day backtest (May 20-24, 2026)
+# ---------------------------------------------------------------------------
+# Reduced from 25 → 12 coins based on actual trade data:
+#   - 5 proven trade-generators (NEAR, DOT, TRX, FIL, ATOM) — produced real wins
+#   - 2 anchors (BTC for regime + BNB high win rate / break-even)
+#   - 5 diversifiers across correlation bands so we are not over-concentrated
+#     if these specific coins enter a chop period (FTM, MANA, MATIC, ETH, ARB)
+#
+# Removed: DENT (-₹217 single biggest loser, 8% win rate), ALGO (0% win rate),
+# SUSHI (-₹60, 17% win rate), GALA, SOL, XLM, VET, HOT (zero price movement),
+# AAVE/SHIB/XRP/ENJ/SAND/CHZ (too thin data or chronic losers).
+
 COINS = [
     # -----------------------------------------------------------------------
-    # BTC/INR — regime gate AND tradeable.
-    # Blocked from override in BTC SHORT regime (corr=1.0 with itself).
+    # Anchors — required regardless of trade-generation
     # -----------------------------------------------------------------------
-    "BTC/INR",
+    "BTC/INR",    # corr=1.00 — regime gate + tradeable
 
     # -----------------------------------------------------------------------
-    # Band 1 — negative / near-zero BTC correlation (most independent)
-    # These move against BTC or on their own narrative entirely
+    # Diversification — independent narratives, different correlation bands
     # -----------------------------------------------------------------------
-    "FTM/INR",    # corr=-0.65 — Fantom L1, strongest negative corr available
-    "ENJ/INR",    # corr=-0.49 — Gaming NFT / Enjin ecosystem
-    "DENT/INR",   # corr=-0.43 — Telecom data token, strongly decorrelated
-    "MANA/INR",   # corr=-0.40 — Metaverse / Decentraland, own narrative
-    "SAND/INR",   # corr=-0.39 — Metaverse / gaming, own narrative
-    "XLM/INR",    # corr=-0.22 — Stellar payments, negative correlation
-    "CHZ/INR",    # corr=-0.17 — Sports/fan tokens, event-driven
-    "MATIC/INR",  # corr=+0.13 — Polygon L2, most independent L2 available
-    "ETH/INR",    # corr=+0.22 — Layer 1, most independent on INR markets
-    "HOT/INR",    # corr=+0.33 — Holochain/Web3, own ecosystem, high volume
+    "FTM/INR",    # corr=-0.65 — strongest negative correlation available
+    "MANA/INR",   # corr=-0.40 — metaverse, own narrative
+    "MATIC/INR",  # corr=+0.13 — Polygon L2, very independent
+    "ETH/INR",    # corr=+0.22 — Layer 1, deep INR liquidity
+    "ARB/INR",    # corr=+0.38 — 100% win rate in backtest (3/3)
 
     # -----------------------------------------------------------------------
-    # Band 2 — low-moderate BTC correlation (moves partly independently)
+    # Proven trade-generators — real winners in backtest data
     # -----------------------------------------------------------------------
-    "ARB/INR",    # corr=+0.38 — Arbitrum L2, Ethereum ecosystem narrative
-    "ATOM/INR",   # corr=+0.47 — Cosmos IBC, proven independent (live trade hit)
-    "AAVE/INR",   # corr=+0.48 — DeFi lending, protocol-driven narrative
-    "XRP/INR",    # corr=+0.59 — Payments/remittance, regulatory news driven
-    "NEAR/INR",   # corr=+0.60 — Layer 1, own developer ecosystem
-    "VET/INR",    # corr=+0.65 — Supply chain, enterprise partnerships driven
-    "SHIB/INR",   # corr=+0.65 — Meme, community/social driven, huge volume
-    "GALA/INR",   # corr=+0.70 — Gaming token, own game launches
-    "BNB/INR",    # corr=+0.70 — Exchange token, own exchange dynamics
-    "SUSHI/INR",  # corr=+0.70 — DEX protocol, DeFi narrative
-
-    # -----------------------------------------------------------------------
-    # Band 3 — moderate BTC correlation, diverse sectors
-    # -----------------------------------------------------------------------
-    "ALGO/INR",   # corr=+0.72 — Layer 1 / payments, institutional focus
-    "TRX/INR",    # corr=+0.72 — Layer 1 / content, TRON ecosystem
-    "FIL/INR",    # corr=+0.74 — Decentralised storage, independent demand
-    "DOT/INR",    # corr=+0.75 — Parachain, own governance narrative
-    "SOL/INR",    # corr=+0.76 — Solana ecosystem, own developer community
+    "ATOM/INR",   # corr=+0.47 — best trade +₹14.68, 29% win rate
+    "NEAR/INR",   # corr=+0.60 — top coin, +₹40 total, 49% wins, +₹28.60 best
+    "BNB/INR",    # corr=+0.70 — 53% win rate, near break-even
+    "TRX/INR",    # corr=+0.72 — 35% wins, +₹6.95 best
+    "FIL/INR",    # corr=+0.74 — 30% wins, +₹13.07 best
+    "DOT/INR",    # corr=+0.75 — 40% wins, +₹12.44 best
 ]
 
 # ---------------------------------------------------------------------------
@@ -138,11 +131,27 @@ ATR_EXPANSION_RATIO = 0.50   # ATR must be >= 50% of its 20-bar SMA
                               # (skips entries during volatility compression)
 
 # ---------------------------------------------------------------------------
-# Tier 1 — Partial profit-taking (scale-out at first target)
+# Tier 1 — Two-stage partial profit-taking (scale-out at two targets)
 # ---------------------------------------------------------------------------
+# Based on backtest data: NEAR-style moves often ran from +3% to +6%, and
+# many "stuck profit" exits happened at +0.5%-+2% where a single partial at
+# +3% never fired. Two-stage capture solves both:
+#
+#   Tier 1A: close 25% at +2.0%   — lock in a small profit even on weak moves
+#   Tier 1B: close 25% at +3.0%   — main partial, original behaviour
+#   Remaining 50% trails with effective_trail (3% in BULL, 2% otherwise)
+#
+# Counter-trend trades skip Tier 1A and use a single partial at +1.5%
+# (COUNTER_TREND_TP_PCT below) on 50% — bounces don't have room for
+# two-stage scale-out.
 
-PARTIAL_TAKE_PROFIT_PCT = 0.030   # close PARTIAL_EXIT_RATIO of position at +3%
-PARTIAL_EXIT_RATIO      = 0.50    # fraction of position to close at first target
+PARTIAL_TP_1A_PCT       = 0.020   # Tier 1A: close 25% at +2%
+PARTIAL_TP_1B_PCT       = 0.030   # Tier 1B: close 25% at +3% (was the only partial)
+PARTIAL_EXIT_RATIO_1A   = 0.25    # fraction of original position closed at Tier 1A
+PARTIAL_EXIT_RATIO_1B   = 0.25    # fraction of original position closed at Tier 1B
+# Legacy aliases kept so any unchanged caller still works:
+PARTIAL_TAKE_PROFIT_PCT = PARTIAL_TP_1B_PCT
+PARTIAL_EXIT_RATIO      = 0.50    # combined Tier 1A+1B = 50% of original
 
 # ---------------------------------------------------------------------------
 # Tier 2 — Trailing stop on the remaining half
@@ -388,3 +397,18 @@ REGIME_FLIP_EXIT_CORR  = 0.65   # coins with corr above this get force-exited on
 #
 # Coins with corr > CT_BLOCK_CORR_IN_SHORT cannot open CT positions in BTC SHORT.
 CT_BLOCK_CORR_IN_SHORT = 0.65   # block CT entries for corr > this in BTC SHORT
+
+# ---------------------------------------------------------------------------
+# 4H Per-coin Hard Entry Gate
+# ---------------------------------------------------------------------------
+# Previously: 4H BEAR direction on a coin just flagged the trade as
+# counter-trend (tighter TP/trail).
+# Problem: DENT had 5 stop-losses because 1H signals fired bullish bounces
+# while 4H was clearly bearish. The CT-flag was not enough protection.
+#
+# Now: if 4H Supertrend on the coin is BEAR, block the entry entirely.
+# This is the right filter at the right timeframe — the 4H reflects the
+# coin's actual multi-hour structure, not a 1H bounce inside a downtrend.
+#
+# Set to False to revert to the old CT-flag-only behaviour.
+USE_4H_HARD_GATE = True   # block entry when 4H direction on coin is BEAR
