@@ -241,7 +241,7 @@ LONG_SOFT_REQUIRED = 2
 # CT trades are below EMA200 — they need stronger confirmation than trend entries
 # to compensate for trading against the macro direction.
 # Set higher than LONG_SOFT_REQUIRED to filter out the weakest CT signals.
-CT_SOFT_REQUIRED = 4   # CT entries need 3/4 vs 2/4 for trend entries
+CT_SOFT_REQUIRED = 4   # CT entries need 4/4 vs 2/4 for trend entries
 
 # ---------------------------------------------------------------------------
 # BTC regime override — high-conviction independent LONGs
