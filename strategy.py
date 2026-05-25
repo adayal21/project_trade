@@ -580,7 +580,7 @@ def check_15min_ct_exit(symbol: str) -> tuple[bool, str]:
 MARKET_HEALTH_ADX_MIN   = 20    # lower than entry ADX — we want a broad read,
                                  # not strict trending. If even this isn't met,
                                  # the market is genuinely dead.
-MARKET_HEALTH_MIN_COINS = 2     # at least 2 of 5 reference alts must be trending
+MARKET_HEALTH_MIN_COINS = 1     # at least 1 of 5 reference alts must be trending
                                  # (BTC is checked separately as a hard requirement)
 
 # Reference coins — always fetched for health check, never traded
