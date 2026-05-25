@@ -192,7 +192,7 @@ TIME_EXIT_STAGNANT_HOURS_BULL = 2    # 4A: BTC LONG — same, 2h across the boar
 TIME_EXIT_LOSING_HOURS        = 2    # 4D: cut losing position after 2h — thesis failed
 TIME_EXIT_LOSING_HOURS_BEAR   = 2    # 4D: same in neutral/bear — no reason to hold longer
 TIME_EXIT_MIN_MOVE_PCT        = 0.003 # 4A threshold: |move| < 0.3% = stagnant
-TIME_EXIT_EXTENDED_HOURS      = 2    # 4B: stuck profitable but no TP — exit at 2h, take what you have
+TIME_EXIT_EXTENDED_HOURS      = 4    # 4B: stuck profitable but no TP — exit at 2h, take what you have
 TIME_EXIT_TRAIL_HOURS         = 2    # 4C: trailing remainder — close 2h after Tier 1, don't wait indefinitely
 
 # ---------------------------------------------------------------------------

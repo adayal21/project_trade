@@ -1209,9 +1209,19 @@ for symbol in COINS:
             tier4_reason = f"TIME_EXIT_LOSING ({hours_held:.1f}h, move={move_pct:.2%})"
 
         # 4B — stuck profitable: Tier 1 never fired, take small gain
-        if not tier4_exit and not already_partial                 and hours_held >= TIME_EXIT_EXTENDED_HOURS                 and 0 < move_pct < effective_tp:
+        # Signal-aware: only exit if signal has weakened to <= 2/4.
+        # If signal is still 3/4 or 4/4, hold — coin is still trending.
+        # Selling a strong-signal position just to re-enter at a higher
+        # price creates unnecessary tax events in live trading.
+        _current_score = signal_data.get('soft_confirmations', 0) if signal_data else 0
+        _signal_weak   = _current_score <= 2
+        if not tier4_exit and not already_partial \
+                and hours_held >= TIME_EXIT_EXTENDED_HOURS \
+                and 0 < move_pct < effective_tp \
+                and _signal_weak:
             tier4_exit   = True
-            tier4_reason = f"TIME_EXIT_STUCK_PROFIT ({hours_held:.1f}h, move={move_pct:.2%})"
+            tier4_reason = (f"TIME_EXIT_STUCK_PROFIT ({hours_held:.1f}h, "
+                            f"move={move_pct:.2%}, score={_current_score}/4)")
 
         # 4C — trailing half timeout
         if not tier4_exit and already_partial                 and hours_held >= TIME_EXIT_TRAIL_HOURS:
