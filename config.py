@@ -138,7 +138,7 @@ REGIME_VOTE_THRESHOLD  = 2  # out of 3 indicators must agree for LONG or SHORT
 # INR pairs trend at lower ADX readings than USD pairs because INR
 # volatility inflates ATR without adding directional trend strength.
 
-ADX_THRESHOLD       = 23.0   # min ADX for a market to count as trending
+ADX_THRESHOLD       = 25.0   # min ADX for a market to count as trending
 ATR_EXPANSION_RATIO = 0.50   # ATR must be >= 50% of its 20-bar SMA
                               # (skips entries during volatility compression)
 
@@ -245,9 +245,9 @@ COUNTER_TREND_TRAIL_PCT = 0.010   # tighter trail for bear-market bounces
 # Soft condition score threshold for LONG entry.
 # 4 soft conditions scored: RSI>52, Volume>Baseline, Close>EMA200, Close>EMA50
 # Need LONG_SOFT_REQUIRED of 4 to enter.
-# Set to 2 — requires two independent confirmations.
+# Set to 3 — requires three independent confirmations.
 
-LONG_SOFT_REQUIRED = 2
+LONG_SOFT_REQUIRED = 3
 
 # Minimum soft score required for counter-trend entries.
 # CT trades are below EMA200 — they need stronger confirmation than trend entries
