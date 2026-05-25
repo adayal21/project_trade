@@ -27,14 +27,23 @@ from config import (
     REGIME_FLIP_EXIT, REGIME_FLIP_EXIT_CORR,
     CT_BLOCK_CORR_IN_SHORT,
     USE_4H_HARD_GATE,
-    NO_TRADE_COINS,
-    REENTRY_MIN_MOVE_PCT,
 )
 from strategy import (apply_indicators, generate_signal,
-                      confirm_15min_momentum, get_4h_direction, check_15min_ct_exit)
+                      confirm_15min_momentum, get_4h_direction,
+                      check_15min_ct_exit, check_mean_reversion)
 from portfolio import initialize_portfolio, log_portfolio
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Mean Reversion eligible coins
+# ---------------------------------------------------------------------------
+# Backtested on NEAR/INR, DOT/INR, FIL/INR — these three showed the cleanest
+# single-candle panic-spike-and-recover behaviour on CoinDCX INR pairs.
+# NEAR is included but has the weakest signal; FIL and DOT are strongest.
+# Extend this list only after running backtest_meanrev_v2.py on new coins.
+
+MR_COINS = {"NEAR/INR", "DOT/INR", "FIL/INR"}
 
 # ---------------------------------------------------------------------------
 # State helpers
@@ -564,6 +573,26 @@ for symbol in COINS:
     latest_price = float(df["Close"].iloc[-1])
     position     = load_position(symbol)
 
+    # ------------------------------------------------------------------
+    # Lane 2: Mean Reversion signal check
+    # Runs on MR_COINS only, when there is no open position and no
+    # momentum signal. BTC must not be SHORT.
+    # If it fires it is stored in mr_signal_data; the entry block below
+    # treats it like a momentum entry but routes exits differently.
+    # ------------------------------------------------------------------
+    mr_signal_data = None
+    if (symbol in MR_COINS
+            and position is None
+            and signal_dir is None
+            and btc_regime != "SHORT"):
+        mr_signal_data = check_mean_reversion(df)
+        if mr_signal_data:
+            print(f"  📉 MR signal — drop {mr_signal_data['drop_pct']:.1f}%  "
+                  f"RSI={mr_signal_data['rsi']:.1f}  "
+                  f"TP=+{mr_signal_data['mr_tp_pct']*100:.0f}%  "
+                  f"SL=-{mr_signal_data['mr_sl_pct']*100:.0f}%  "
+                  f"MaxHold={mr_signal_data['mr_max_hours']}h")
+
     # Determine effective TP and trail targets.
     # Counter-trend LONGs (bounces below EMA200) use tighter targets
     # so we bank profit quickly before the macro trend reasserts.
@@ -627,7 +656,7 @@ for symbol in COINS:
     # Stop-loss — always checked first, no gate bypasses this
     # Applies to the full remaining quantity (whether or not Tier 1 fired)
     # -------------------------------------------------------------------
-    if position is not None:
+    if position is not None and not int(position.get("MR_Entry", 0)):
         side        = position['Side']
         entry_price = float(position['Entry Price'])
         quantity    = float(position['Quantity'])
@@ -667,6 +696,88 @@ for symbol in COINS:
             position = None
 
     # -------------------------------------------------------------------
+    # Lane 2 exit: MR positions use simple TP / SL / deadline logic.
+    # They never enter the Tier 1/2/3/4 system — they're short bounce
+    # trades, not trend rides. Routing them here ensures the tiered exits
+    # below are completely untouched.
+    # -------------------------------------------------------------------
+    if position is not None and int(position.get("MR_Entry", 0)) == 1:
+        mr_tp    = float(position.get("MR_TP_Price", 0))
+        mr_sl    = float(position.get("MR_SL_Price", 0))
+        mr_ddl   = str(position.get("MR_Deadline", ""))
+        side     = position["Side"]
+        ep       = float(position["Entry Price"])
+        qty      = float(position["Quantity"])
+        now_utc  = datetime.now(timezone.utc)
+
+        mr_exit_price  = None
+        mr_exit_reason = None
+
+        # TP hit
+        if latest_price >= mr_tp > 0:
+            mr_exit_price  = mr_tp
+            mr_exit_reason = "MR_TP"
+
+        # SL hit
+        elif latest_price <= mr_sl > 0:
+            mr_exit_price  = mr_sl
+            mr_exit_reason = "MR_SL"
+
+        # Deadline (time backstop)
+        elif mr_ddl:
+            try:
+                deadline = datetime.fromisoformat(mr_ddl)
+                if now_utc >= deadline:
+                    mr_exit_price  = latest_price
+                    mr_exit_reason = "MR_TIMEOUT"
+            except ValueError:
+                pass
+
+        if mr_exit_price is not None:
+            pnl = (mr_exit_price - ep) / ep * ep * qty
+            print(f"  {'✅' if pnl >= 0 else '⛔'} MR EXIT — {mr_exit_reason} "
+                  f"| Entry={ep:.4f} → Exit={mr_exit_price:.4f} "
+                  f"| PnL: {pnl:+.2f}")
+            run_events.append(f"{symbol} {pnl:+.2f} {mr_exit_reason}")
+
+            realized_pnl    += pnl
+            total_trades    += 1
+            trades_this_run += 1
+            cash            += ep * qty + pnl
+
+            log_trade(symbol, {
+                "Coin":        symbol,
+                "Side":        side,
+                "Entry Price": ep,
+                "Exit Price":  round(mr_exit_price, 6),
+                "Quantity":    qty,
+                "PnL":         round(pnl, 4),
+                "Exit Reason": mr_exit_reason,
+                "Exit Time":   now_utc,
+            })
+
+            if TRADING_MODE == "live":
+                from exchange import place_market_order
+                place_market_order(symbol, "sell", qty)
+            clear_position(symbol)
+            dir_counts_cache = count_open_by_direction()
+            position = None
+
+        else:
+            # Still holding — show MR position status
+            move_pct = (latest_price - ep) / ep
+            print(f"  📉 MR HOLDING | Entry={ep:.4f} | Now={latest_price:.4f} "
+                  f"| Move={move_pct:+.2%} "
+                  f"| TP={mr_tp:.4f} SL={mr_sl:.4f}")
+            if mr_ddl:
+                try:
+                    deadline = datetime.fromisoformat(mr_ddl)
+                    hrs_left = (deadline - now_utc).total_seconds() / 3600
+                    print(f"     Deadline in {hrs_left:.1f}h")
+                except ValueError:
+                    pass
+
+    # -------------------------------------------------------------------
     # Tier 1 — Two-stage partial profit-taking
     # -------------------------------------------------------------------
     # Stage 1A: at +2% → close 25% of original position (locks small profit)
@@ -677,7 +788,7 @@ for symbol in COINS:
     # on 50% of position — bounces don't have room for two-stage scale-out.
     # The legacy effective_tp variable still drives the CT path.
     # -------------------------------------------------------------------
-    if position is not None:
+    if position is not None and not int(position.get("MR_Entry", 0)):
         side             = position['Side']
         entry_price      = float(position['Entry Price'])
         quantity         = float(position['Quantity'])
@@ -844,7 +955,7 @@ for symbol in COINS:
     # Updates the high-water mark each bar and exits if price drops
     # TRAILING_STOP_PCT below the peak.
     # -------------------------------------------------------------------
-    if position is not None:
+    if position is not None and not int(position.get("MR_Entry", 0)):
         side            = position['Side']
         entry_price     = float(position['Entry Price'])
         quantity        = float(position['Quantity'])
@@ -1057,7 +1168,7 @@ for symbol in COINS:
     #   4B  Stuck+   : hours_held >= TIME_EXIT_EXTENDED_HOURS  AND 0 < move < TP
     #   4C  Trail TO : Tier 1 fired AND hours_held >= TIME_EXIT_TRAIL_HOURS
     # -------------------------------------------------------------------
-    if position is not None:
+    if position is not None and not int(position.get("MR_Entry", 0)):
         side            = position['Side']
         entry_price     = float(position['Entry Price'])
         quantity        = float(position['Quantity'])
@@ -1159,12 +1270,6 @@ for symbol in COINS:
     # -------------------------------------------------------------------
     if position is None and signal_dir is not None:
 
-        # Gate 0: NO_TRADE_COINS — fetch data for regime but never enter positions
-        if symbol in NO_TRADE_COINS:
-            print(f"  🚫 {symbol} is in NO_TRADE_COINS — data used for regime only, no entry.")
-            print()
-            continue
-
         # Gate 1 (implicit): position is None — coin is flat ✓
 
         # Gate 1.5: RSI reset filter
@@ -1173,27 +1278,6 @@ for symbol in COINS:
             print(f"  🚫 RSI reset: {rsi_block_reason}")
             print()
             continue
-
-        # Gate 1.55: Re-entry move filter — after a stagnant or losing exit,
-        # require price to have moved at least REENTRY_MIN_MOVE_PCT in the
-        # signal direction from the last exit price before re-entry is allowed.
-        # Prevents immediately re-entering the same flat/losing coin.
-        _last_t2 = get_last_trade(symbol)
-        if _last_t2 is not None:
-            _last_reason2  = str(_last_t2.get("Exit Reason", ""))
-            _last_exit_px2 = float(_last_t2.get("Exit Price", 0))
-            _stagnant_exits = {"TIME_EXIT_STAGNANT", "TIME_EXIT_LOSING", "TIME_EXIT_STUCK_PROFIT"}
-            if _last_reason2 in _stagnant_exits and _last_exit_px2 > 0:
-                if signal_dir == "LONG":
-                    _move_from_exit = (latest_price - _last_exit_px2) / _last_exit_px2
-                else:
-                    _move_from_exit = (_last_exit_px2 - latest_price) / _last_exit_px2
-                if _move_from_exit < REENTRY_MIN_MOVE_PCT:
-                    print(f"  🚫 Re-entry move filter — price moved only {_move_from_exit:.2%} "
-                          f"from last {_last_reason2} exit (need ≥{REENTRY_MIN_MOVE_PCT:.1%}). "
-                          f"Coin hasn't shown fresh directional move yet.")
-                    print()
-                    continue
 
         # Gate 1.6: Re-entry price filter — don't re-enter below last exit price
         # When a coin completed a profitable cycle (trail stop or trail timeout),
@@ -1313,6 +1397,15 @@ for symbol in COINS:
         # Queued as candidate — entry handled in Step 3B ranked pass.
         pass
 
+    elif position is None and mr_signal_data is not None:
+        # Lane 2: no momentum signal fired but MR did — queue for entry.
+        # MR entries are always lower priority than momentum entries.
+        # They use 'soft_confirmations': 0 so they rank last if both fire
+        # on different coins in the same run.
+        print(f"  📋 MR candidate queued — will enter if slot available after "
+              f"momentum candidates.")
+        entry_candidates.append((symbol, mr_signal_data, df))
+
     elif position is not None and signal_dir == position['Side']:
         print(f"  Holding {position['Side']} (signal agrees, no action).")
 
@@ -1353,18 +1446,22 @@ if entry_candidates:
         signal_dir   = signal_data["signal"]
         latest_price = float(df["Close"].iloc[-1])
 
+        # MR_LONG maps to LONG for all position counting / gate purposes
+        is_mr        = (signal_dir == "MR_LONG")
+        gate_dir     = "LONG" if is_mr else signal_dir
+
         is_counter_trend = signal_data.get('counter_trend', False)
         effective_tp     = COUNTER_TREND_TP_PCT    if is_counter_trend else PARTIAL_TAKE_PROFIT_PCT
         effective_trail  = COUNTER_TREND_TRAIL_PCT if is_counter_trend else TRAILING_STOP_PCT
 
-        print(f"--- {symbol} (ranked entry) ---")
+        print(f"--- {symbol} ({'MR' if is_mr else 'momentum'} ranked entry) ---")
 
         # Gate 3: position count — regime-aware max, checked here so ranking takes effect
         dir_counts  = dir_counts_cache
         _max_pos    = effective_max_positions(btc_regime)
-        if dir_counts[signal_dir] >= _max_pos:
-            print(f"  🚫 Correlation guard — already {dir_counts[signal_dir]} "
-                  f"{signal_dir}(s) open (max={_max_pos} in {btc_regime or 'NEUTRAL'} regime). Blocked.")
+        if dir_counts[gate_dir] >= _max_pos:
+            print(f"  🚫 Correlation guard — already {dir_counts[gate_dir]} "
+                  f"{gate_dir}(s) open (max={_max_pos} in {btc_regime or 'NEUTRAL'} regime). Blocked.")
             print()
             continue
 
@@ -1401,14 +1498,11 @@ if entry_candidates:
         quantity = allocation / latest_price
 
         # Gate 4: 15-min momentum confirmation
-        # Verifies that intra-bar momentum is still alive in the signal direction
-        # before committing. Prevents buying at the top of a 1H rally that has
-        # already peaked before our entry bar.
-        #
-        # Exception: 4/4 score signals bypass this gate even if 15-min RSI is flat.
-        # All four 1H conditions agree — a one-bar RSI stall shouldn't block the
-        # strongest signals. RSI must still be >= 50 (not falling into bearish).
-        if CONFIRM_15MIN:
+        # MR entries bypass this gate — the whole point of mean reversion is
+        # that price just dropped and RSI is low. Requiring 15-min RSI > 50
+        # would block 100% of valid MR entries. MR has its own confirmation
+        # built into the signal (drop size + 4H RSI oversold).
+        if CONFIRM_15MIN and not is_mr:
             _entry_score = signal_data.get('soft_confirmations', 0)
             mom_ok, mom_reason = confirm_15min_momentum(symbol, signal_dir)
             if not mom_ok and _entry_score >= 4:
@@ -1450,7 +1544,7 @@ if entry_candidates:
         is_ct = signal_data.get('counter_trend', False)
         save_position(symbol, {
             "Coin":          symbol,
-            "Side":          signal_dir,
+            "Side":          "LONG",   # MR_LONG → LONG on disk
             "Entry Price":   latest_price,
             "Quantity":      quantity,
             "Timestamp":     datetime.now(timezone.utc),
@@ -1460,6 +1554,15 @@ if entry_candidates:
             "Trail_HWM":     latest_price,
             "Bars_Held":     0,
             "Counter_Trend": int(is_ct),
+            # MR-specific fields — used by exit logic to route to simple TP/SL
+            "MR_Entry":      1 if is_mr else 0,
+            "MR_TP_Price":   round(latest_price * (1 + signal_data["mr_tp_pct"]), 6)
+                             if is_mr else 0,
+            "MR_SL_Price":   round(latest_price * (1 - signal_data["mr_sl_pct"]), 6)
+                             if is_mr else 0,
+            "MR_Deadline":   (datetime.now(timezone.utc) +
+                              timedelta(hours=signal_data["mr_max_hours"])).isoformat()
+                             if is_mr else "",
         })
 
         cash -= allocation
@@ -1467,18 +1570,24 @@ if entry_candidates:
         total_trades += 1
         trades_this_run += 1
 
-        run_events.append(f"{symbol} ENTRY {signal_dir}")
-        print(f"  ✅ Entered {signal_dir} @ {latest_price:.4f}")
+        entry_label = "MR_LONG" if is_mr else signal_dir
+        run_events.append(f"{symbol} ENTRY {entry_label}")
+        print(f"  ✅ Entered {entry_label} @ {latest_price:.4f}")
         print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f} | Risk={_risk_rate:.0%} (score={_score}/4)")
-        mode_label = "LONG-only" if LONG_ONLY else "LONG+SHORT"
-        ct_label   = " | ⚠️  COUNTER-TREND (tighter exits)" if signal_data.get('counter_trend') else ""
-        print(f"     ADX={signal_data['adx']:.1f} | RSI={signal_data['rsi']:.1f} | "
-              f"Confirmations={signal_data['soft_confirmations']}/4 | "
-              f"BTC_Regime={btc_regime or 'NEUTRAL'} | Mode={mode_label}{ct_label}")
-        if signal_data.get('counter_trend'):
-            print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (counter-trend targets)")
+        if is_mr:
+            print(f"     Drop={signal_data['drop_pct']:.1f}%  RSI={signal_data['rsi']:.1f}  "
+                  f"TP=+{signal_data['mr_tp_pct']*100:.0f}%  SL=-{signal_data['mr_sl_pct']*100:.0f}%  "
+                  f"MaxHold={signal_data['mr_max_hours']}h  BTC_Regime={btc_regime or 'NEUTRAL'}")
         else:
-            print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (trend targets)")
+            mode_label = "LONG-only" if LONG_ONLY else "LONG+SHORT"
+            ct_label   = " | ⚠️  COUNTER-TREND (tighter exits)" if signal_data.get('counter_trend') else ""
+            print(f"     ADX={signal_data['adx']:.1f} | RSI={signal_data['rsi']:.1f} | "
+                  f"Confirmations={signal_data['soft_confirmations']}/4 | "
+                  f"BTC_Regime={btc_regime or 'NEUTRAL'} | Mode={mode_label}{ct_label}")
+            if signal_data.get('counter_trend'):
+                print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (counter-trend targets)")
+            else:
+                print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (trend targets)")
         print()
 
 # ---------------------------------------------------------------------------
@@ -1598,14 +1707,33 @@ for symbol in COINS:
     print(f"Entry Price        : {entry_price:.2f}")
     print(f"Current Price      : {current_price:.2f}")
     print(f"Current Profit     : {profit_sign}{move_pct:.1%}")
-    print(f"Peak Profit        : {peak_sign}{peak_pct:.1%}")
-    if already_partial and reversal_pct is not None:
-        print(f"Reversal           : {abs(reversal_pct):.1%}")
-    print(f"Trailing Exit      : {trail_label}")
-    print(f"Partial TP         : {'YES' if already_partial else 'NO'}")
-    print(f"Bars Held          : {bars_held}")
-    print(f"Status             : {status}")
-    print(f"Reason             : {reason}")
+
+    # MR positions show their own TP/SL targets instead of tier info
+    if int(position.get("MR_Entry", 0)) == 1:
+        mr_tp  = float(position.get("MR_TP_Price", 0))
+        mr_sl  = float(position.get("MR_SL_Price", 0))
+        mr_ddl = str(position.get("MR_Deadline", ""))
+        print(f"Type               : MEAN REVERSION")
+        print(f"MR TP Target       : {mr_tp:.4f}  (+{(mr_tp/entry_price-1)*100:.1f}%)")
+        print(f"MR SL Target       : {mr_sl:.4f}  (-{(1-mr_sl/entry_price)*100:.1f}%)")
+        if mr_ddl:
+            try:
+                deadline  = datetime.fromisoformat(mr_ddl)
+                now_utc   = datetime.now(timezone.utc)
+                hrs_left  = (deadline - now_utc).total_seconds() / 3600
+                print(f"Deadline           : {hrs_left:.1f}h remaining")
+            except ValueError:
+                pass
+    else:
+        print(f"Peak Profit        : {peak_sign}{peak_pct:.1%}")
+        if already_partial and reversal_pct is not None:
+            print(f"Reversal           : {abs(reversal_pct):.1%}")
+        print(f"Trailing Exit      : {trail_label}")
+        print(f"Partial TP         : {'YES' if already_partial else 'NO'}")
+        print(f"Bars Held          : {bars_held}")
+        print(f"Status             : {status}")
+        print(f"Reason             : {reason}")
+
     print(f"PnL                : {pnl_sign}{pnl:.2f}")
 
 if not any_open:
