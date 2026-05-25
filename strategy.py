@@ -547,3 +547,176 @@ def check_15min_ct_exit(symbol: str) -> tuple[bool, str]:
                       f"({recent}) — bounce reversing, exiting early")
 
     return False, f"15min CT: {falling_count}/{CT_EXIT_CONSEC_BARS} falling bars — holding"
+
+# ---------------------------------------------------------------------------
+# Market Health Check
+# ---------------------------------------------------------------------------
+# Checks the BROADER crypto market before allowing any new entries.
+# Uses 6 reference coins that represent different market sectors —
+# not your trading coins, but the market as a whole.
+#
+# Reference basket (fixed — high INR volume, sector-diverse):
+#   BTC/INR  — macro regime (already fetched)
+#   ETH/INR  — Layer 1, largest alt
+#   SOL/INR  — Layer 1, high beta
+#   BNB/INR  — exchange token
+#   XRP/INR  — payments / retail
+#   MATIC/INR — L2 / independent
+#
+# A coin is "trending" if:
+#   ADX > MARKET_HEALTH_ADX_MIN  AND  close > EMA50
+#
+# Market is HEALTHY if:
+#   BTC is trending  AND  at least MARKET_HEALTH_MIN_COINS of the 5 alts
+#   are also trending.
+#
+# If market is UNHEALTHY: all new entries blocked. Open positions
+# continue through their normal exit tiers — only NEW entries are gated.
+#
+# MR (mean reversion) entries bypass this gate — they are counter-trend
+# by nature and fire precisely when a coin drops in an otherwise healthy
+# or recovering market. Blocking MR on market health would defeat its purpose.
+
+MARKET_HEALTH_ADX_MIN   = 20    # lower than entry ADX — we want a broad read,
+                                 # not strict trending. If even this isn't met,
+                                 # the market is genuinely dead.
+MARKET_HEALTH_MIN_COINS = 2     # at least 2 of 5 reference alts must be trending
+                                 # (BTC is checked separately as a hard requirement)
+
+# Reference coins — always fetched for health check, never traded
+# (some may overlap with COINS list — that's fine, data is reused)
+MARKET_HEALTH_COINS = [
+    "ETH/INR",
+    "SOL/INR",
+    "BNB/INR",
+    "XRP/INR",
+    "MATIC/INR",
+]
+
+
+def check_market_health(coins_data: dict) -> tuple[bool, str, dict]:
+    """
+    Check broader market health before allowing new entries.
+
+    Parameters
+    ----------
+    coins_data : dict
+        Already-fetched and indicator-applied DataFrames keyed by symbol.
+        Any reference coins not already in coins_data are fetched fresh.
+
+    Returns
+    -------
+    (is_healthy, reason_string, detail_dict)
+        is_healthy  : True = ok to enter, False = hold cash
+        reason      : human-readable summary for the log
+        detail      : per-coin results for verbose logging
+    """
+    detail = {}
+
+    # ── BTC check — hard requirement ──────────────────────────────────────
+    btc_df = coins_data.get("BTC/INR")
+    if btc_df is None or len(btc_df) < 55:
+        # Can't check BTC — fail open (don't block entries on data failure)
+        return True, "BTC data unavailable — health check skipped (fail-open)", {}
+
+    btc_adx   = float(btc_df["ADX"].iloc[-1])
+    btc_close = float(btc_df["Close"].iloc[-1])
+    btc_ema50 = float(btc_df["EMA50"].iloc[-1])
+    btc_trend = btc_adx >= MARKET_HEALTH_ADX_MIN and btc_close > btc_ema50
+    detail["BTC/INR"] = {
+        "adx": round(btc_adx, 1),
+        "above_ema50": btc_close > btc_ema50,
+        "trending": btc_trend
+    }
+
+    if not btc_trend:
+        reason = (f"BTC not trending — ADX={btc_adx:.1f} "
+                  f"({'above' if btc_close > btc_ema50 else 'below'} EMA50). "
+                  f"Market health FAIL — holding cash.")
+        return False, reason, detail
+
+    # ── Reference alt basket ──────────────────────────────────────────────
+    trending_count = 0
+    results = []
+
+    for sym in MARKET_HEALTH_COINS:
+        # Reuse already-fetched data if available
+        df = coins_data.get(sym)
+        if df is None or len(df) < 55:
+            # Fetch fresh — this coin isn't in the bot's COINS list
+            raw = _fetch_candles(sym, "1h", 250)
+            if raw.empty or len(raw) < 55:
+                detail[sym] = {"trending": None, "reason": "no data"}
+                results.append(f"{sym.split('/')[0]}:?")
+                continue
+            # Apply minimal indicators needed
+            df = raw.rename(columns={"close":"Close","high":"High",
+                                     "low":"Low","open":"Open","volume":"Volume"})
+            from ta.trend import EMAIndicator, ADXIndicator
+            df["EMA50"] = EMAIndicator(df["Close"], window=50).ema_indicator()
+            adx_ind     = ADXIndicator(df["High"], df["Low"], df["Close"], window=14)
+            df["ADX"]   = adx_ind.adx()
+
+        adx   = float(df["ADX"].iloc[-1])
+        close = float(df["Close"].iloc[-1])
+        ema50 = float(df["EMA50"].iloc[-1])
+        trending = adx >= MARKET_HEALTH_ADX_MIN and close > ema50
+
+        detail[sym] = {
+            "adx": round(adx, 1),
+            "above_ema50": close > ema50,
+            "trending": trending
+        }
+        if trending:
+            trending_count += 1
+            results.append(f"{sym.split('/')[0]}:✅")
+        else:
+            results.append(f"{sym.split('/')[0]}:❌"
+                           f"(ADX={adx:.0f},{'↑' if close > ema50 else '↓'}EMA50)")
+
+    basket_str = "  ".join(results)
+    is_healthy = trending_count >= MARKET_HEALTH_MIN_COINS
+
+    if is_healthy:
+        reason = (f"Market health OK — BTC trending ✅  "
+                  f"Alts {trending_count}/{len(MARKET_HEALTH_COINS)} trending  "
+                  f"[{basket_str}]")
+    else:
+        reason = (f"Market health FAIL — BTC trending ✅ but only "
+                  f"{trending_count}/{len(MARKET_HEALTH_COINS)} alts trending "
+                  f"(need {MARKET_HEALTH_MIN_COINS})  [{basket_str}]  "
+                  f"— holding cash, no new entries.")
+
+    return is_healthy, reason, detail
+
+
+def _fetch_candles(symbol: str, interval: str, limit: int) -> pd.DataFrame:
+    """Thin wrapper around the existing _fetch_candles logic for health check use."""
+    return _fetch_candles_raw(symbol, interval, limit)
+
+
+def _fetch_candles_raw(symbol: str, interval: str, limit: int) -> pd.DataFrame:
+    """Fetch raw candles — used only by check_market_health for non-COINS symbols."""
+    target, base = symbol.split("/")
+    pair = f"I-{target}_{base}"
+    try:
+        r = requests.get(
+            "https://public.coindcx.com/market_data/candles",
+            params={"pair": pair, "interval": interval, "limit": limit},
+            timeout=8
+        )
+        if r.status_code != 200:
+            return pd.DataFrame()
+        data = r.json()
+        if not data or len(data) < 3:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        df["close"]  = pd.to_numeric(df["close"])
+        df["high"]   = pd.to_numeric(df["high"])
+        df["low"]    = pd.to_numeric(df["low"])
+        df["open"]   = pd.to_numeric(df["open"])
+        df["volume"] = pd.to_numeric(df["volume"])
+        df["time"]   = pd.to_datetime(pd.to_numeric(df["time"]), unit="ms")
+        return df.sort_values("time").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()

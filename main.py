@@ -30,7 +30,8 @@ from config import (
 )
 from strategy import (apply_indicators, generate_signal,
                       confirm_15min_momentum, get_4h_direction,
-                      check_15min_ct_exit, check_mean_reversion)
+                      check_15min_ct_exit, check_mean_reversion,
+                      check_market_health)
 from portfolio import initialize_portfolio, log_portfolio
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1412,6 +1413,55 @@ for symbol in COINS:
     # Only add blank line if header was printed
     if position is not None or signal_data is not None:
         print()
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Step 3B-PRE: Market Health Gate
+# ---------------------------------------------------------------------------
+# Before entering ANY new position, check that the broader crypto market
+# is actually trending. Uses a 6-coin reference basket (BTC + 5 alts).
+# If the market is unhealthy, entry_candidates is cleared — no new trades.
+#
+# MR (mean reversion) entries bypass this gate — they fire on panic drops
+# and are counter-trend by design. Blocking them on market health defeats
+# their purpose. Only momentum entries are gated.
+#
+# Open positions are NOT affected — they continue through normal exit tiers.
+
+if entry_candidates:
+    market_ok, market_reason, market_detail = check_market_health(coins_data)
+
+    print()
+    print("=" * 50)
+    print("Market Health Check")
+    print("=" * 50)
+    print(f"  {market_reason}")
+
+    if VERBOSE_DIAG and market_detail:
+        for sym, d in market_detail.items():
+            if d.get("trending") is not None:
+                print(f"    {sym:<12} ADX={d.get('adx','?'):>5}  "
+                      f"EMA50={'↑' if d.get('above_ema50') else '↓'}  "
+                      f"{'✅' if d.get('trending') else '❌'}")
+    print()
+
+    if not market_ok:
+        # Split candidates — keep MR entries, drop momentum entries
+        mr_candidates  = [(s, d, f) for s, d, f in entry_candidates
+                          if d.get("signal") == "MR_LONG"]
+        mom_candidates = [(s, d, f) for s, d, f in entry_candidates
+                          if d.get("signal") != "MR_LONG"]
+
+        if mom_candidates:
+            blocked = [s for s, _, _ in mom_candidates]
+            print(f"  🚫 Market health FAIL — blocking {len(mom_candidates)} "
+                  f"momentum entry/entries: {blocked}")
+
+        if mr_candidates:
+            print(f"  ✅ MR entries bypass market health gate: "
+                  f"{[s for s, _, _ in mr_candidates]}")
+
+        entry_candidates = mr_candidates   # only MR entries proceed
 
 # ---------------------------------------------------------------------------
 # Step 3B: Ranked entry — enter best candidates first
