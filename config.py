@@ -36,17 +36,16 @@ else:
     INITIAL_CAPITAL = 10000
 
 # ---------------------------------------------------------------------------
-# Coin universe — data-driven selection from 2-day backtest (May 20-24, 2026)
+# Coin universe
 # ---------------------------------------------------------------------------
-# Reduced from 25 → 12 coins based on actual trade data:
-#   - 5 proven trade-generators (NEAR, DOT, TRX, FIL, ATOM) — produced real wins
-#   - 2 anchors (BTC for regime + BNB high win rate / break-even)
-#   - 5 diversifiers across correlation bands so we are not over-concentrated
-#     if these specific coins enter a chop period (FTM, MANA, MATIC, ETH, ARB)
-#
-# Removed: DENT (-₹217 single biggest loser, 8% win rate), ALGO (0% win rate),
-# SUSHI (-₹60, 17% win rate), GALA, SOL, XLM, VET, HOT (zero price movement),
-# AAVE/SHIB/XRP/ENJ/SAND/CHZ (too thin data or chronic losers).
+# Changes 2026-05-25:
+#   Removed : ATOM/INR — ₹1.6L daily vol (too thin), consistent losses
+#   Removed : FTM/INR  — corrupted candle data (30,892%/hr move artifact)
+#   Added   : SOL/INR  — ₹1Cr+ daily vol, deeply liquid
+#   Added   : XRP/INR  — ₹67L daily vol, well-behaved
+#   Added   : DOGE/INR — ₹35L daily vol, solid movement
+#   Added   : INJ/INR  — highest vol/liquidity ratio (1.37%/hr, ₹10L vol)
+#   Added   : ADA/INR  — ₹14L daily vol, stable
 
 COINS = [
     # -----------------------------------------------------------------------
@@ -57,21 +56,34 @@ COINS = [
     # -----------------------------------------------------------------------
     # Diversification — independent narratives, different correlation bands
     # -----------------------------------------------------------------------
-    "FTM/INR",    # corr=-0.65 — strongest negative correlation available
     "MANA/INR",   # corr=-0.40 — metaverse, own narrative
     "MATIC/INR",  # corr=+0.13 — Polygon L2, very independent
     "ETH/INR",    # corr=+0.22 — Layer 1, deep INR liquidity
     "ARB/INR",    # corr=+0.38 — 100% win rate in backtest (3/3)
+    "XRP/INR",    # corr=+0.59 — ₹67L daily vol, liquid and well-behaved
 
     # -----------------------------------------------------------------------
     # Proven trade-generators — real winners in backtest data
     # -----------------------------------------------------------------------
-    "ATOM/INR",   # corr=+0.47 — best trade +₹14.68, 29% win rate
     "NEAR/INR",   # corr=+0.60 — top coin, +₹40 total, 49% wins, +₹28.60 best
     "BNB/INR",    # corr=+0.70 — 53% win rate, near break-even
     "TRX/INR",    # corr=+0.72 — 35% wins, +₹6.95 best
     "FIL/INR",    # corr=+0.74 — 30% wins, +₹13.07 best
     "DOT/INR",    # corr=+0.75 — 40% wins, +₹12.44 best
+
+    # -----------------------------------------------------------------------
+    # New additions (2026-05-25) — passed volume + volatility check
+    # -----------------------------------------------------------------------
+    "SOL/INR",    # corr=+0.76 — ₹1Cr+ daily vol, deeply liquid
+    "DOGE/INR",   # corr=+0.72 — ₹35L daily vol, solid movement
+    "INJ/INR",    # corr=+0.65 — highest vol/liquidity ratio (1.37%/hr, ₹10L vol)
+    "ADA/INR",    # corr=+0.70 — ₹14L daily vol, stable
+
+    # -----------------------------------------------------------------------
+    # Removed coins (kept as comments for reference)
+    # -----------------------------------------------------------------------
+    # "FTM/INR"  — removed 2026-05-25: corrupted candle data
+    # "ATOM/INR" — removed 2026-05-25: too thin volume, consistent losses
 ]
 
 # ---------------------------------------------------------------------------
@@ -346,6 +358,7 @@ COIN_BTC_CORR = {
     "AAVE/INR":  0.480,
     "XRP/INR":   0.589,
     "NEAR/INR":  0.604,
+    "INJ/INR":   0.650,
     "VET/INR":   0.647,
     "SHIB/INR":  0.648,
     "GALA/INR":  0.698,
@@ -354,6 +367,8 @@ COIN_BTC_CORR = {
     # Band 3
     "ALGO/INR":  0.717,
     "TRX/INR":   0.723,
+    "DOGE/INR":  0.720,
+    "ADA/INR":   0.700,
     "FIL/INR":   0.741,
     "DOT/INR":   0.750,
     "SOL/INR":   0.764,
