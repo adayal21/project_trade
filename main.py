@@ -27,6 +27,8 @@ from config import (
     REGIME_FLIP_EXIT, REGIME_FLIP_EXIT_CORR,
     CT_BLOCK_CORR_IN_SHORT,
     USE_4H_HARD_GATE,
+    NO_TRADE_COINS,
+    REENTRY_MIN_MOVE_PCT,
 )
 from strategy import (apply_indicators, generate_signal,
                       confirm_15min_momentum, get_4h_direction, check_15min_ct_exit)
@@ -1157,6 +1159,12 @@ for symbol in COINS:
     # -------------------------------------------------------------------
     if position is None and signal_dir is not None:
 
+        # Gate 0: NO_TRADE_COINS — fetch data for regime but never enter positions
+        if symbol in NO_TRADE_COINS:
+            print(f"  🚫 {symbol} is in NO_TRADE_COINS — data used for regime only, no entry.")
+            print()
+            continue
+
         # Gate 1 (implicit): position is None — coin is flat ✓
 
         # Gate 1.5: RSI reset filter
@@ -1165,6 +1173,27 @@ for symbol in COINS:
             print(f"  🚫 RSI reset: {rsi_block_reason}")
             print()
             continue
+
+        # Gate 1.55: Re-entry move filter — after a stagnant or losing exit,
+        # require price to have moved at least REENTRY_MIN_MOVE_PCT in the
+        # signal direction from the last exit price before re-entry is allowed.
+        # Prevents immediately re-entering the same flat/losing coin.
+        _last_t2 = get_last_trade(symbol)
+        if _last_t2 is not None:
+            _last_reason2  = str(_last_t2.get("Exit Reason", ""))
+            _last_exit_px2 = float(_last_t2.get("Exit Price", 0))
+            _stagnant_exits = {"TIME_EXIT_STAGNANT", "TIME_EXIT_LOSING", "TIME_EXIT_STUCK_PROFIT"}
+            if _last_reason2 in _stagnant_exits and _last_exit_px2 > 0:
+                if signal_dir == "LONG":
+                    _move_from_exit = (latest_price - _last_exit_px2) / _last_exit_px2
+                else:
+                    _move_from_exit = (_last_exit_px2 - latest_price) / _last_exit_px2
+                if _move_from_exit < REENTRY_MIN_MOVE_PCT:
+                    print(f"  🚫 Re-entry move filter — price moved only {_move_from_exit:.2%} "
+                          f"from last {_last_reason2} exit (need ≥{REENTRY_MIN_MOVE_PCT:.1%}). "
+                          f"Coin hasn't shown fresh directional move yet.")
+                    print()
+                    continue
 
         # Gate 1.6: Re-entry price filter — don't re-enter below last exit price
         # When a coin completed a profitable cycle (trail stop or trail timeout),

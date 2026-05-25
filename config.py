@@ -126,7 +126,7 @@ REGIME_VOTE_THRESHOLD  = 2  # out of 3 indicators must agree for LONG or SHORT
 # INR pairs trend at lower ADX readings than USD pairs because INR
 # volatility inflates ATR without adding directional trend strength.
 
-ADX_THRESHOLD       = 18.0   # min ADX for a market to count as trending
+ADX_THRESHOLD       = 23.0   # min ADX for a market to count as trending
 ATR_EXPANSION_RATIO = 0.50   # ATR must be >= 50% of its 20-bar SMA
                               # (skips entries during volatility compression)
 
@@ -175,10 +175,10 @@ TRAILING_STOP_PCT       = 0.020   # trail 2% below the high-water mark price
 # profit within a tight window, the thesis is wrong — free up the slot.
 # Maximum any trade can stay alive: 2h (4B stuck profitable, worst case).
 
-TIME_EXIT_STAGNANT_HOURS      = 1    # 4A: NEUTRAL/BEAR — market not supporting move, cut at 1h
-TIME_EXIT_STAGNANT_HOURS_BULL = 1    # 4A: BTC LONG — same, 1h across the board
-TIME_EXIT_LOSING_HOURS        = 1    # 4D: cut losing position after 1h — thesis failed
-TIME_EXIT_LOSING_HOURS_BEAR   = 1    # 4D: same in neutral/bear — no reason to hold longer
+TIME_EXIT_STAGNANT_HOURS      = 2    # 4A: NEUTRAL/BEAR — market not supporting move, cut at 2h
+TIME_EXIT_STAGNANT_HOURS_BULL = 2    # 4A: BTC LONG — same, 2h across the board
+TIME_EXIT_LOSING_HOURS        = 2    # 4D: cut losing position after 2h — thesis failed
+TIME_EXIT_LOSING_HOURS_BEAR   = 2    # 4D: same in neutral/bear — no reason to hold longer
 TIME_EXIT_MIN_MOVE_PCT        = 0.003 # 4A threshold: |move| < 0.3% = stagnant
 TIME_EXIT_EXTENDED_HOURS      = 2    # 4B: stuck profitable but no TP — exit at 2h, take what you have
 TIME_EXIT_TRAIL_HOURS         = 2    # 4C: trailing remainder — close 2h after Tier 1, don't wait indefinitely
@@ -287,8 +287,25 @@ CT_EXIT_CONSEC_BARS   = 2       # consecutive 15-min bearish bars before early e
 MIN_15MIN_RSI         = 50      # 15-min RSI must be above this at entry
 REQUIRE_15MIN_RSI_RISING = True  # 15-min RSI must also be rising bar-over-bar
 # ---------------------------------------------------------------------------
-# Diagnostic output switch
+# Coins excluded from entry (still fetched for regime/data purposes)
 # ---------------------------------------------------------------------------
+# BTC/INR is required in COINS for the regime gate (get_btc_regime reads
+# coins_data["BTC/INR"]). But at ₹10k capital the position size is too
+# tiny to be meaningful — 8% = ₹800 buys ~0.0001 BTC, spread eats the edge.
+# List coins here to fetch their data but never open positions in them.
+
+NO_TRADE_COINS = {"BTC/INR"}
+
+# ---------------------------------------------------------------------------
+# Re-entry price move filter (post stagnant/losing exit)
+# ---------------------------------------------------------------------------
+# After a TIME_EXIT_STAGNANT or TIME_EXIT_LOSING exit, require price to move
+# at least this % in the signal direction before re-entry is allowed.
+# Prevents the "exit flat coin → immediately re-enter same flat coin" loop.
+# RSI reset alone is not enough — price must show actual directional movement.
+
+REENTRY_MIN_MOVE_PCT = 0.005   # 0.5% move required from last exit price
+
 # When True: prints [DIAG], [VOL DIAG], [CT-monitor], [15min] lines every run.
 # When False: only prints entries, exits, signals, and portfolio snapshot.
 # Default OFF — keeps live.log small when running every 15 minutes.
