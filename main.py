@@ -87,49 +87,85 @@ def log_trade(symbol: str, trade: dict) -> None:
 
 def get_last_trade(symbol: str) -> dict | None:
     """Return the most recent FULL-CLOSE trade for this symbol, or None.
-    Partial-profit rows are skipped — they are not failed trades."""
+    All partial-profit rows are skipped — they are not full position closes."""
     file = get_trade_file(symbol)
     if not os.path.exists(file):
         return None
     df = pd.read_csv(file)
-    full_closes = df[df["Exit Reason"] != "PARTIAL_PROFIT"]
+    # Exclude all partial rows — both stages of the two-tier partial
+    partial_reasons = {"PARTIAL_PROFIT", "PARTIAL_PROFIT_1A", "PARTIAL_PROFIT_1B"}
+    full_closes = df[~df["Exit Reason"].isin(partial_reasons)]
     if full_closes.empty:
         return None
     return full_closes.iloc[-1].to_dict()
 
 
 # ---------------------------------------------------------------------------
-# RSI reset check — re-entry filter after losing trades
+# RSI reset check — re-entry filter after losing OR completed winning trades
 # ---------------------------------------------------------------------------
-# After a losing trade, the market must prove momentum genuinely resumed
-# before re-entry in the same direction. Prevents the same weak signal
-# from re-firing immediately after it failed.
+# Two scenarios both require RSI to prove fresh momentum before re-entry:
 #
-#   Losing SHORT exit → require RSI < RSI_RESET_SHORT (45) AND RSI falling
-#   Losing LONG exit  → require RSI > RSI_RESET_LONG  (55) AND RSI rising
+# 1. After a LOSING trade (original behaviour):
+#    The signal that just fired was wrong — RSI must reset past 55 (rising)
+#    to confirm genuine new momentum, not the same fading move re-firing.
+#
+# 2. After a COMPLETED WINNING CYCLE (new):
+#    When a coin just ran its full cycle (trail stop or trail timeout after
+#    partial), the move is likely exhausted. Price is pulling back from the
+#    peak. RSI must reset past 55 fresh before re-entry — same requirement
+#    as after a loss, but triggered by a winning exit instead.
+#    This prevents buying a coin at ₹242 that just peaked at ₹250.
+#
+#    "Completed winning cycle" = last full-close was TRAILING_STOP or
+#    TIME_EXIT_TRAIL_TIMEOUT AND the trade was profitable (PnL > 0).
+#    Simple TIME_EXIT_LOSING or TIME_EXIT_STAGNANT exits are already
+#    handled by the loss path above.
+#
+#   LONG reset: RSI must be > RSI_RESET_LONG (55) AND rising bar-over-bar
 # ---------------------------------------------------------------------------
+
+_COMPLETED_CYCLE_REASONS = {"TRAILING_STOP", "TIME_EXIT_TRAIL_TIMEOUT"}
 
 def rsi_reset_allows_entry(symbol: str, signal_dir: str, df: pd.DataFrame) -> tuple[bool, str]:
     last = get_last_trade(symbol)
     if last is None:
         return True, ""
 
-    last_side = str(last.get("Side", ""))
-    last_pnl  = float(last.get("PnL", 0))
+    last_side   = str(last.get("Side", ""))
+    last_pnl    = float(last.get("PnL", 0))
+    last_reason = str(last.get("Exit Reason", ""))
 
-    # Filter only applies when last full-close was same direction AND a loss
-    if last_side != signal_dir or last_pnl >= 0:
+    # Only applies when last full-close was same direction as new signal
+    if last_side != signal_dir:
         return True, ""
 
     latest_rsi = float(df.iloc[-1]["RSI"])
     prev_rsi   = float(df.iloc[-2]["RSI"])
     arrow      = "↓" if latest_rsi < prev_rsi else "↑"
 
+    # Determine if RSI reset is required
+    need_reset = False
+    reset_reason_label = ""
+
+    if last_pnl < 0:
+        # Case 1: last trade was a loss — original behaviour
+        need_reset = True
+        reset_reason_label = "losing trade"
+
+    elif last_pnl > 0 and last_reason in _COMPLETED_CYCLE_REASONS:
+        # Case 2: last trade completed a profitable cycle (trail fired)
+        # The move is exhausted — require fresh RSI before re-entry
+        need_reset = True
+        reset_reason_label = f"completed winning cycle ({last_reason}, +{last_pnl:.2f})"
+
+    if not need_reset:
+        return True, ""
+
     if signal_dir == "SHORT":
         if latest_rsi < RSI_RESET_SHORT and latest_rsi < prev_rsi:
             return True, ""
         return False, (
-            f"RSI reset required after losing SHORT "
+            f"RSI reset required after {reset_reason_label} "
             f"(need RSI<{RSI_RESET_SHORT} & falling, got RSI={latest_rsi:.1f}{arrow})"
         )
 
@@ -137,9 +173,10 @@ def rsi_reset_allows_entry(symbol: str, signal_dir: str, df: pd.DataFrame) -> tu
         if latest_rsi > RSI_RESET_LONG and latest_rsi > prev_rsi:
             return True, ""
         return False, (
-            f"RSI reset required after losing LONG "
+            f"RSI reset required after {reset_reason_label} "
             f"(need RSI>{RSI_RESET_LONG} & rising, got RSI={latest_rsi:.1f}{arrow})"
         )
+
     return True, ""
 
 
@@ -1128,6 +1165,31 @@ for symbol in COINS:
             print(f"  🚫 RSI reset: {rsi_block_reason}")
             print()
             continue
+
+        # Gate 1.6: Re-entry price filter — don't re-enter below last exit price
+        # When a coin completed a profitable cycle (trail stop or trail timeout),
+        # the last exit price is the high-water mark of that move. If current
+        # price is below that exit price, the coin is retracing — buying it now
+        # is chasing a declining price, not a fresh move.
+        #
+        # Example: NEAR trailed out at ₹242.74. Re-entry at ₹242.13 is below
+        # that exit — the coin is falling from its recent peak. Block it.
+        # Block only applies after completed winning cycles, not after losses
+        # (after a loss we want a recovery, so higher price is expected).
+        _last_t = get_last_trade(symbol)
+        if _last_t is not None:
+            _last_pnl    = float(_last_t.get("PnL", 0))
+            _last_reason = str(_last_t.get("Exit Reason", ""))
+            _last_exit_px = float(_last_t.get("Exit Price", 0))
+            if (_last_pnl > 0
+                    and _last_reason in _COMPLETED_CYCLE_REASONS
+                    and signal_dir == "LONG"
+                    and latest_price < _last_exit_px):
+                print(f"  🚫 Re-entry price check — current ₹{latest_price:.4f} is below "
+                      f"last exit ₹{_last_exit_px:.4f} after {_last_reason}. "
+                      f"Coin retracing from peak, not a fresh move.")
+                print()
+                continue
 
         # Gate 2: BTC regime filter
         if symbol != "BTC/INR":
