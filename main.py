@@ -1194,9 +1194,22 @@ for symbol in COINS:
             print()
             continue
 
-        # Gate 2.6: CT-in-SHORT correlation block
-        # Counter-trend entries for high-corr coins in BTC SHORT regime are
-        # knife-catching. Low-corr coins (DENT, FTM etc.) can still CT-enter.
+        # Gate 2.6: Block ALL longs for high-corr coins in BTC SHORT regime.
+        # Previously only CT entries were blocked. But trend entries for BNB,
+        # TRX, FIL, DOT were still going through in a falling market and losing.
+        # In BTC SHORT, any coin with corr > 0.65 moves with BTC — entering a
+        # LONG regardless of signal type is fighting the macro direction.
+        # Low-corr coins (FTM -0.65, MANA -0.40, MATIC +0.13, ETH +0.22, ARB +0.38)
+        # are below the threshold and still evaluated on their own merit.
+        if btc_regime == "SHORT" and coin_corr > 0.65:
+            print(f"  🚫 BTC SHORT regime — ALL longs blocked for {symbol} "
+                  f"(corr={coin_corr:.2f} > 0.65). High-corr coin in bear market.")
+            print()
+            continue
+
+        # Gate 2.7: CT-in-SHORT correlation block for low-corr coins.
+        # Low-corr coins can trend-enter in BTC SHORT but still can't CT-enter —
+        # even independent coins shouldn't bounce-trade against their own 4H BEAR.
         if is_ct and btc_regime == "SHORT" and coin_corr > CT_BLOCK_CORR_IN_SHORT:
             print(f"  🚫 CT entry blocked — BTC SHORT regime + corr={coin_corr:.2f} > {CT_BLOCK_CORR_IN_SHORT}. "
                   f"Too correlated to BTC to bounce-trade in bear market.")
