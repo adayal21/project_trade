@@ -1446,22 +1446,34 @@ if entry_candidates:
     print()
 
     if not market_ok:
-        # Split candidates — keep MR entries, drop momentum entries
-        mr_candidates  = [(s, d, f) for s, d, f in entry_candidates
-                          if d.get("signal") == "MR_LONG"]
-        mom_candidates = [(s, d, f) for s, d, f in entry_candidates
-                          if d.get("signal") != "MR_LONG"]
+        # Split candidates into three buckets:
+        #   1. MR entries        — always allowed (counter-trend by design)
+        #   2. 4/4 score entries — allowed (coin trending independently, max conviction)
+        #   3. 3/4 and below    — blocked (market too weak for lower-conviction entries)
+        mr_candidates      = [(s, d, f) for s, d, f in entry_candidates
+                              if d.get("signal") == "MR_LONG"]
+        highconv_candidates = [(s, d, f) for s, d, f in entry_candidates
+                               if d.get("signal") != "MR_LONG"
+                               and d.get("soft_confirmations", 0) >= 4]
+        blocked_candidates  = [(s, d, f) for s, d, f in entry_candidates
+                               if d.get("signal") != "MR_LONG"
+                               and d.get("soft_confirmations", 0) < 4]
 
-        if mom_candidates:
-            blocked = [s for s, _, _ in mom_candidates]
-            print(f"  🚫 Market health FAIL — blocking {len(mom_candidates)} "
-                  f"momentum entry/entries: {blocked}")
+        if blocked_candidates:
+            blocked = [s for s, _, _ in blocked_candidates]
+            print(f"  🚫 Market health FAIL — blocking {len(blocked_candidates)} "
+                  f"entry/entries (score < 4/4): {blocked}")
+
+        if highconv_candidates:
+            allowed = [s for s, _, _ in highconv_candidates]
+            print(f"  ⚡ 4/4 score override — entering despite weak market: {allowed}")
 
         if mr_candidates:
             print(f"  ✅ MR entries bypass market health gate: "
                   f"{[s for s, _, _ in mr_candidates]}")
 
-        entry_candidates = mr_candidates   # only MR entries proceed
+        # Only high-conviction + MR entries proceed
+        entry_candidates = highconv_candidates + mr_candidates
 
 # ---------------------------------------------------------------------------
 # Step 3B: Ranked entry — enter best candidates first
