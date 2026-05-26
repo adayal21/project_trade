@@ -914,7 +914,9 @@ for symbol in COINS:
                     "Entry Price":   entry_price,
                     "Quantity":      remain_qty,
                     "Timestamp":     position['Timestamp'],
-                    "Partial_Taken": 0,           # Tier 1B not yet, trail not active
+                    "Partial_Taken": 1,           # Trail activates immediately after 1A
+                                                  # Protects remaining 75% from reversal
+                                                  # without waiting for 1B at +3%
                     "Tier1A_Taken":  1,
                     "Original_Qty":  orig_qty,
                     "Trail_HWM":     latest_price,   # seed HWM at 1A price
