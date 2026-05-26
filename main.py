@@ -31,7 +31,7 @@ from config import (
 from strategy import (apply_indicators, generate_signal,
                       confirm_15min_momentum, get_4h_direction,
                       check_15min_ct_exit, check_mean_reversion,
-                      check_market_health)
+                      check_market_health, get_daily_trend)
 from portfolio import initialize_portfolio, log_portfolio
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -1371,6 +1371,21 @@ for symbol in COINS:
                   f"(1H bounce inside multi-hour downtrend).")
             print()
             continue
+
+        # Gate 2.45: Daily trend alignment gate
+        # Coin must be above its daily EMA50 to confirm the bigger picture
+        # trend is bullish. A coin can show 4/4 on 1H while being in a
+        # clear daily downtrend — this gate blocks those entries.
+        # Fails open on data error so a candle fetch failure never blocks
+        # a valid entry.
+        if symbol != "BTC/INR":
+            _daily_bull, _daily_reason = get_daily_trend(symbol)
+            if not _daily_bull:
+                print(f"  🚫 Daily trend not aligned — {_daily_reason}")
+                print()
+                continue
+            if VERBOSE_DIAG:
+                print(f"  [Daily] {_daily_reason}")
 
         # Gate 2.5: CT minimum score filter
         # Counter-trend entries need higher confirmation than trend entries.

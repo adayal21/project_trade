@@ -3,7 +3,7 @@ import numpy as np
 import requests
 from ta.trend import EMAIndicator, ADXIndicator
 from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
+from ta.volatility import AverageTrueRange, BollingerBands
 from config import (ADX_THRESHOLD, ATR_EXPANSION_RATIO, LONG_ONLY, LONG_SOFT_REQUIRED,
                     MIN_15MIN_RSI, REQUIRE_15MIN_RSI_RISING, CT_EXIT_CONSEC_BARS)
 
@@ -106,6 +106,44 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Supertrend (with corrected band logic)
     df = calculate_supertrend(df)
 
+    # -----------------------------------------------------------------------
+    # Volatility Squeeze — Bollinger Bands vs Keltner Channels
+    # -----------------------------------------------------------------------
+    # Squeeze ON  = BB inside KC → volatility compressed, energy building
+    # Squeeze OFF = BB outside KC → volatility expanding, move starting
+    #
+    # We only want to enter when squeeze is OFF (expansion phase).
+    # Entering during squeeze ON means entering during compression —
+    # no sustained move is likely yet.
+    # Entering mid-expansion (squeeze already OFF for many bars) is fine —
+    # we catch the continuation.
+    # The check we use: was the squeeze ON in the last N bars and just
+    # fired OFF? That's the ideal entry — catching the breakout moment.
+    bb          = BollingerBands(df['Close'], window=20, window_dev=2)
+    df['BB_Upper'] = bb.bollinger_hband()
+    df['BB_Lower'] = bb.bollinger_lband()
+    df['BB_Width'] = df['BB_Upper'] - df['BB_Lower']
+
+    # Keltner Channel using ATR (multiplier 1.5 — standard squeeze setting)
+    kc_mid         = EMAIndicator(df['Close'], window=20).ema_indicator()
+    df['KC_Upper'] = kc_mid + 1.5 * df['ATR']
+    df['KC_Lower'] = kc_mid - 1.5 * df['ATR']
+
+    # Squeeze ON when BB is inside KC
+    df['Squeeze_On'] = (
+        (df['BB_Upper'] < df['KC_Upper']) &
+        (df['BB_Lower'] > df['KC_Lower'])
+    )
+
+    # -----------------------------------------------------------------------
+    # Higher High — price breaking upward at entry
+    # -----------------------------------------------------------------------
+    # Current close must be above the highest close of previous 3 bars.
+    # This confirms price is breaking out, not pulling back or bouncing.
+    # Prevents entering mid-pullback after an exhausted move.
+    df['Prev3_High'] = df['Close'].shift(1).rolling(3).max()
+    df['Higher_High'] = df['Close'] > df['Prev3_High']
+
     return df
 
 
@@ -114,7 +152,9 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 _REQUIRED_COLUMNS = ['EMA200', 'EMA50', 'RSI', 'Volume_Baseline', 'ATR', 'ATR_SMA', 'ADX',
-                     'Supertrend', 'Supertrend_Upper', 'Supertrend_Lower']
+                     'Supertrend', 'Supertrend_Upper', 'Supertrend_Lower',
+                     'BB_Upper', 'BB_Lower', 'KC_Upper', 'KC_Lower',
+                     'Squeeze_On', 'Higher_High', 'Prev3_High']
 _MIN_BARS = 200   # driven by EMA200 warm-up
 
 
@@ -170,6 +210,21 @@ def generate_signal(
     # where price precision causes ATR to appear as 0.0000. Skip the check rather
     # than dividing by zero or blocking a valid signal on a precision artifact.
     if latest['ATR_SMA'] > 0 and latest['ATR'] < atr_expansion_ratio * latest['ATR_SMA']:
+        return None
+
+    # 3. Volatility Squeeze filter: only enter when volatility is expanding
+    # If squeeze is ON (BB inside KC) → market is compressed, no sustained
+    # move likely. Block entry and wait for the squeeze to fire.
+    # If squeeze is OFF → expansion phase, genuine move possible.
+    # Note: squeeze OFF for many bars is fine — we catch continuation.
+    if bool(latest['Squeeze_On']):
+        return None
+
+    # 4. Higher High filter: price must be breaking upward at entry
+    # Current close must be above the highest close of the previous 3 bars.
+    # This blocks pullback entries and re-entries into exhausted moves.
+    # Only applied to LONG signals — confirms price is making new highs.
+    if pd.isna(latest['Prev3_High']) or not bool(latest['Higher_High']):
         return None
 
     # ------------------------------------------------------------------
@@ -241,6 +296,9 @@ def generate_signal(
             "s2_volume":         s2_volume,
             "s3_ema200":         s3_ema200,
             "s4_ema50":          s4_ema50,
+            "higher_high":       bool(latest['Higher_High']),
+            "squeeze_on":        bool(latest['Squeeze_On']),
+            "prev3_high":        float(latest['Prev3_High']),
         }
 
     if short_condition and not LONG_ONLY:
@@ -372,6 +430,45 @@ def _fetch_candles(symbol: str, interval: str, limit: int) -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# Daily trend alignment — is the coin above its daily EMA50?
+# ---------------------------------------------------------------------------
+# Checks the daily candle timeframe to confirm the coin is in a genuine
+# uptrend on the bigger picture. A coin can look bullish on 1H while
+# being in a clear daily downtrend — this filter blocks those entries.
+#
+# Returns (is_bullish, reason):
+#   is_bullish = True  → daily close above daily EMA50 → trend aligned
+#   is_bullish = False → daily close below daily EMA50 → against daily trend
+#
+# Fails open (returns True) if data is unavailable — don't block entries
+# just because a candle fetch failed.
+
+def get_daily_trend(symbol: str) -> tuple[bool, str]:
+    """
+    Check whether the coin is above its daily EMA50.
+    Returns (is_bullish, reason_string).
+    Fails open on data error.
+    """
+    df = _fetch_candles(symbol, "1d", 60)   # 60 daily candles = ~2 months
+    if df.empty or len(df) < 52:
+        return True, "Daily data unavailable — failing open"
+
+    df_ind = df.rename(columns={"close": "Close", "high": "High",
+                                 "low": "Low", "open": "Open",
+                                 "volume": "Volume"})
+    ema50_daily = EMAIndicator(df_ind["Close"], window=50).ema_indicator()
+    close       = float(df_ind["Close"].iloc[-1])
+    ema50       = float(ema50_daily.iloc[-1])
+    is_bullish  = close > ema50
+
+    direction = "above" if is_bullish else "below"
+    reason = (f"Daily close=₹{close:.4f} {direction} "
+              f"daily EMA50=₹{ema50:.4f} "
+              f"→ {'✅ aligned' if is_bullish else '❌ against daily trend'}")
+    return is_bullish, reason
 
 
 def fetch_15min(symbol: str, limit: int = 20) -> pd.DataFrame:
