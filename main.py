@@ -27,6 +27,7 @@ from config import (
     REGIME_FLIP_EXIT, REGIME_FLIP_EXIT_CORR,
     CT_BLOCK_CORR_IN_SHORT,
     USE_4H_HARD_GATE,
+    ADX_THRESHOLD, ATR_EXPANSION_RATIO,
 )
 from strategy import (apply_indicators, generate_signal,
                       confirm_15min_momentum, get_4h_direction,
@@ -618,8 +619,6 @@ for symbol in COINS:
 
     # ------------------------------------------------------------------
     # Per-coin single-line status — always printed, one line per coin.
-    # Shows every indicator with human-readable label + tick/cross.
-    # Candidate/Holding/Blocked appended at end — no separate lines.
     # ------------------------------------------------------------------
     _row       = df.iloc[-1]
     _atr_ratio = (_row["ATR"] / _row["ATR_SMA"]) if _row["ATR_SMA"] > 0 else 0
@@ -635,18 +634,16 @@ for symbol in COINS:
     _s5        = (not pd.isna(_prev3)) and (latest_price > _prev3)
     _score     = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
 
-    # Determine status tag — appended at end of line
     if position is not None:
-        _move = (latest_price - float(position['Entry Price'])) / float(position['Entry Price'])
+        _move   = (latest_price - float(position['Entry Price'])) / float(position['Entry Price'])
         _status = f"📈 Holding {position['Side']} {_move:+.1%}"
     elif signal_data is not None or mr_signal_data is not None:
         _status = "📋 Candidate"
     else:
-        # Find first hard block reason
         if not _adx_ok:
             _reason = f"ADX={_row['ADX']:.1f}<{ADX_THRESHOLD}"
         elif not _atr_ok:
-            _reason = f"ATR compressed"
+            _reason = "ATR compressed"
         elif not _st_bull:
             _reason = "SuperTrend=BEAR"
         elif not _sq_off:
@@ -669,12 +666,9 @@ for symbol in COINS:
           f"score={_score}/5  {_status}")
 
     if VERBOSE_DIAG:
-        print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}  "
-              f"Close>EMA200={latest_price > _row['EMA200']}")
-        print(f"  [DIAG] RSI={_row['RSI']:.2f}  ADX={_row['ADX']:.2f}  "
-              f"Supertrend={'BULL' if _row['Supertrend'] else 'BEAR'}")
+        print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}")
         print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
-              f"Ratio={_atr_ratio:.2f}  ATR_OK={_atr_ratio >= ATR_EXPANSION_RATIO}")
+              f"Ratio={_atr_ratio:.2f}")
         print(f"  [DIAG] Volume={_row['Volume']:.2f}  "
               f"Vol_Baseline={_row['Volume_Baseline']:.2f}")
         if _4h_dir != "N/A":
