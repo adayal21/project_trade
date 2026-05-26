@@ -153,8 +153,10 @@ def apply_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 _REQUIRED_COLUMNS = ['EMA200', 'EMA50', 'RSI', 'Volume_Baseline', 'ATR', 'ATR_SMA', 'ADX',
                      'Supertrend', 'Supertrend_Upper', 'Supertrend_Lower',
-                     'BB_Upper', 'BB_Lower', 'KC_Upper', 'KC_Lower',
-                     'Squeeze_On', 'Higher_High', 'Prev3_High']
+                     'BB_Upper', 'BB_Lower', 'KC_Upper', 'KC_Lower', 'Squeeze_On']
+# Note: Higher_High and Prev3_High intentionally excluded — Prev3_High uses
+# rolling(3) which produces NaN on early bars. NaN is handled explicitly
+# in generate_signal with pd.isna() check instead.
 _MIN_BARS = 200   # driven by EMA200 warm-up
 
 
@@ -785,35 +787,3 @@ def check_market_health(coins_data: dict) -> tuple[bool, str, dict]:
                   f"— holding cash, no new entries.")
 
     return is_healthy, reason, detail
-
-
-def _fetch_candles(symbol: str, interval: str, limit: int) -> pd.DataFrame:
-    """Thin wrapper around the existing _fetch_candles logic for health check use."""
-    return _fetch_candles_raw(symbol, interval, limit)
-
-
-def _fetch_candles_raw(symbol: str, interval: str, limit: int) -> pd.DataFrame:
-    """Fetch raw candles — used only by check_market_health for non-COINS symbols."""
-    target, base = symbol.split("/")
-    pair = f"I-{target}_{base}"
-    try:
-        r = requests.get(
-            "https://public.coindcx.com/market_data/candles",
-            params={"pair": pair, "interval": interval, "limit": limit},
-            timeout=8
-        )
-        if r.status_code != 200:
-            return pd.DataFrame()
-        data = r.json()
-        if not data or len(data) < 3:
-            return pd.DataFrame()
-        df = pd.DataFrame(data)
-        df["close"]  = pd.to_numeric(df["close"])
-        df["high"]   = pd.to_numeric(df["high"])
-        df["low"]    = pd.to_numeric(df["low"])
-        df["open"]   = pd.to_numeric(df["open"])
-        df["volume"] = pd.to_numeric(df["volume"])
-        df["time"]   = pd.to_datetime(pd.to_numeric(df["time"]), unit="ms")
-        return df.sort_values("time").reset_index(drop=True)
-    except Exception:
-        return pd.DataFrame()
