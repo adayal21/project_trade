@@ -80,6 +80,15 @@ COINS = [
     "ADA/INR",    # corr=+0.70 — ₹14L daily vol, stable
 
     # -----------------------------------------------------------------------
+    # New additions (2026-05-26) — more diversity for stricter filter set
+    # -----------------------------------------------------------------------
+    "SAND/INR",   # corr=-0.39 — low corr, ₹5.2L daily vol, 1.03%/hr
+    "AVAX/INR",   # corr=+0.73 — ₹6L daily vol, 0.54%/hr
+    "LINK/INR",   # corr=+0.68 — ₹7.6L daily vol, 0.56%/hr
+    "SUI/INR",    # corr=+0.72 — ₹3L daily vol, 0.72%/hr
+    "OP/INR",     # corr=+0.65 — ₹4.9L daily vol, 1.41%/hr — highest move
+
+    # -----------------------------------------------------------------------
     # Removed coins (kept as comments for reference)
     # -----------------------------------------------------------------------
     # "FTM/INR"  — removed 2026-05-25: corrupted candle data
@@ -372,6 +381,10 @@ COIN_BTC_CORR = {
     "FIL/INR":   0.741,
     "DOT/INR":   0.750,
     "SOL/INR":   0.764,
+    "AVAX/INR":  0.730,
+    "SUI/INR":   0.720,
+    "LINK/INR":  0.680,
+    "OP/INR":    0.650,
 }
 
 # ---------------------------------------------------------------------------

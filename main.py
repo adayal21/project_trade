@@ -618,7 +618,8 @@ for symbol in COINS:
     effective_trail = COUNTER_TREND_TRAIL_PCT if is_counter_trend else _base_trail
 
     # ------------------------------------------------------------------
-    # Per-coin single-line status — always printed, one line per coin.
+    # Per-coin single-line status — only printed if score >= 2 or open position
+    # Shows all indicators with tick/cross on one line.
     # ------------------------------------------------------------------
     _row       = df.iloc[-1]
     _atr_ratio = (_row["ATR"] / _row["ATR_SMA"]) if _row["ATR_SMA"] > 0 else 0
@@ -634,43 +635,45 @@ for symbol in COINS:
     _s5        = (not pd.isna(_prev3)) and (latest_price > _prev3)
     _score     = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
 
-    if position is not None:
-        _move   = (latest_price - float(position['Entry Price'])) / float(position['Entry Price'])
-        _status = f"📈 Holding {position['Side']} {_move:+.1%}"
-    elif signal_data is not None or mr_signal_data is not None:
-        _status = "📋 Candidate"
-    else:
-        if not _adx_ok:
-            _reason = f"ADX={_row['ADX']:.1f}<{ADX_THRESHOLD}"
-        elif not _atr_ok:
-            _reason = "ATR compressed"
-        elif not _st_bull:
-            _reason = "SuperTrend=BEAR"
-        elif not _sq_off:
-            _reason = "Squeeze ON"
-        elif _score < LONG_SOFT_REQUIRED:
-            _reason = f"score={_score}/5 need {LONG_SOFT_REQUIRED}"
+    # Only print if coin has an open position OR score >= 2 (worth watching)
+    _worth_showing = position is not None or _score >= 2
+
+    if _worth_showing:
+        if position is not None:
+            _move   = (latest_price - float(position['Entry Price'])) / float(position['Entry Price'])
+            _status = f"📈 Holding {position['Side']} {_move:+.1%}"
+        elif signal_data is not None or mr_signal_data is not None:
+            _status = "📋 Candidate"
         else:
-            _reason = "filtered"
-        _status = f"⛔ {_reason}"
+            if not _adx_ok:
+                _reason = f"ADX={_row['ADX']:.1f}<{ADX_THRESHOLD}"
+            elif not _atr_ok:
+                _reason = "ATR compressed"
+            elif not _st_bull:
+                _reason = "SuperTrend=BEAR"
+            elif not _sq_off:
+                _reason = "Squeeze ON"
+            elif _score < LONG_SOFT_REQUIRED:
+                _reason = f"score={_score}/5 need {LONG_SOFT_REQUIRED}"
+            else:
+                _reason = "filtered"
+            _status = f"⛔ {_reason}"
 
-    print(f"--- {symbol} --- "
-          f"ADX={_row['ADX']:.1f}{'✅' if _adx_ok else '❌'}  "
-          f"RSI={_row['RSI']:.1f}{'✅' if _s1 else '❌'}  "
-          f"SuperTrend={'✅' if _st_bull else '❌'}  "
-          f"Squeeze={'✅' if _sq_off else '❌'}  "
-          f"Vol={'✅' if _s2 else '❌'}  "
-          f"EMA200={'✅' if _s3 else '❌'}  "
-          f"EMA50={'✅' if _s4 else '❌'}  "
-          f"HighHigh={'✅' if _s5 else '❌'}  "
-          f"score={_score}/5  {_status}")
+        print(f"--- {symbol} --- "
+              f"ADX={_row['ADX']:.1f}{'✅' if _adx_ok else '❌'}  "
+              f"RSI={_row['RSI']:.1f}{'✅' if _s1 else '❌'}  "
+              f"SuperTrend={'✅' if _st_bull else '❌'}  "
+              f"Squeeze={'✅' if _sq_off else '❌'}  "
+              f"Vol={'✅' if _s2 else '❌'}  "
+              f"EMA200={'✅' if _s3 else '❌'}  "
+              f"EMA50={'✅' if _s4 else '❌'}  "
+              f"HighHigh={'✅' if _s5 else '❌'}  "
+              f"score={_score}/5  {_status}")
 
-    if VERBOSE_DIAG:
+    if VERBOSE_DIAG and _worth_showing:
         print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}")
         print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
               f"Ratio={_atr_ratio:.2f}")
-        print(f"  [DIAG] Volume={_row['Volume']:.2f}  "
-              f"Vol_Baseline={_row['Volume_Baseline']:.2f}")
         if _4h_dir != "N/A":
             print(f"  [DIAG] 4H={_4h_dir}  {_4h_reason}")
 
@@ -1445,9 +1448,10 @@ for symbol in COINS:
         entry_candidates.append((symbol, mr_signal_data, df))
 
     elif position is not None and signal_dir == position['Side']:
-        pass   # status already shown on header line
+        pass   # status shown on header line
 
-    print()  # blank line after every coin
+    if _worth_showing:
+        print()
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
