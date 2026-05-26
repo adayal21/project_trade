@@ -617,41 +617,68 @@ for symbol in COINS:
     effective_trail = COUNTER_TREND_TRAIL_PCT if is_counter_trend else _base_trail
 
     # ------------------------------------------------------------------
-    # [DIAG] Per-coin indicator snapshot — only printed when VERBOSE_DIAG=True
+    # Per-coin single-line status — always printed, one line per coin.
+    # Shows every indicator with human-readable label + tick/cross.
+    # Candidate/Holding/Blocked appended at end — no separate lines.
     # ------------------------------------------------------------------
-    _row = df.iloc[-1]
+    _row       = df.iloc[-1]
     _atr_ratio = (_row["ATR"] / _row["ATR_SMA"]) if _row["ATR_SMA"] > 0 else 0
-    # Print coin header only when there is something to report
-    if position is not None or signal_data is not None:
-        print(f"--- {symbol} ---")
+    _adx_ok    = _row["ADX"] >= ADX_THRESHOLD
+    _atr_ok    = _atr_ratio >= ATR_EXPANSION_RATIO
+    _sq_off    = not bool(_row.get("Squeeze_On", False))
+    _st_bull   = bool(_row["Supertrend"])
+    _s1        = _row["RSI"] > 52
+    _s2        = _row["Volume"] > _row["Volume_Baseline"]
+    _s3        = latest_price > _row["EMA200"]
+    _s4        = latest_price > _row["EMA50"]
+    _prev3     = _row.get("Prev3_High", float("nan"))
+    _s5        = (not pd.isna(_prev3)) and (latest_price > _prev3)
+    _score     = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
+
+    # Determine status tag — appended at end of line
+    if position is not None:
+        _move = (latest_price - float(position['Entry Price'])) / float(position['Entry Price'])
+        _status = f"📈 Holding {position['Side']} {_move:+.1%}"
+    elif signal_data is not None or mr_signal_data is not None:
+        _status = "📋 Candidate"
+    else:
+        # Find first hard block reason
+        if not _adx_ok:
+            _reason = f"ADX={_row['ADX']:.1f}<{ADX_THRESHOLD}"
+        elif not _atr_ok:
+            _reason = f"ATR compressed"
+        elif not _st_bull:
+            _reason = "SuperTrend=BEAR"
+        elif not _sq_off:
+            _reason = "Squeeze ON"
+        elif _score < LONG_SOFT_REQUIRED:
+            _reason = f"score={_score}/5 need {LONG_SOFT_REQUIRED}"
+        else:
+            _reason = "filtered"
+        _status = f"⛔ {_reason}"
+
+    print(f"--- {symbol} --- "
+          f"ADX={_row['ADX']:.1f}{'✅' if _adx_ok else '❌'}  "
+          f"RSI={_row['RSI']:.1f}{'✅' if _s1 else '❌'}  "
+          f"SuperTrend={'✅' if _st_bull else '❌'}  "
+          f"Squeeze={'✅' if _sq_off else '❌'}  "
+          f"Vol={'✅' if _s2 else '❌'}  "
+          f"EMA200={'✅' if _s3 else '❌'}  "
+          f"EMA50={'✅' if _s4 else '❌'}  "
+          f"HighHigh={'✅' if _s5 else '❌'}  "
+          f"score={_score}/5  {_status}")
 
     if VERBOSE_DIAG:
         print(f"  [DIAG] Price={latest_price:.4f}  EMA200={_row['EMA200']:.4f}  "
               f"Close>EMA200={latest_price > _row['EMA200']}")
-        print(f"  [DIAG] RSI={_row['RSI']:.2f}  ADX={_row['ADX']:.2f}(thr=18)  "
+        print(f"  [DIAG] RSI={_row['RSI']:.2f}  ADX={_row['ADX']:.2f}  "
               f"Supertrend={'BULL' if _row['Supertrend'] else 'BEAR'}")
         print(f"  [DIAG] ATR={_row['ATR']:.4f}  ATR_SMA={_row['ATR_SMA']:.4f}  "
-              f"Ratio={_atr_ratio:.2f}(thr=0.50)  "
-              f"ATR_OK={_atr_ratio >= 0.50}")
-        print(f"  [DIAG] Volume={_row['Volume']:.2f}  Vol_Baseline={_row['Volume_Baseline']:.2f}  "
-              f"Vol_OK={_row['Volume'] > _row['Volume_Baseline']} (median-based)")
-        print(f"  [DIAG] EMA50={_row['EMA50']:.4f}  Close>EMA50={latest_price > _row['EMA50']}")
+              f"Ratio={_atr_ratio:.2f}  ATR_OK={_atr_ratio >= ATR_EXPANSION_RATIO}")
+        print(f"  [DIAG] Volume={_row['Volume']:.2f}  "
+              f"Vol_Baseline={_row['Volume_Baseline']:.2f}")
         if _4h_dir != "N/A":
             print(f"  [DIAG] 4H={_4h_dir}  {_4h_reason}")
-        if signal_data:
-            ct = signal_data.get('counter_trend', False)
-            print(f"  [DIAG] Signal={signal_dir}  CounterTrend={ct}  "
-                  f"Score={signal_data['soft_confirmations']}/5  "
-                  f"(RSI={signal_data.get('s1_rsi',False)} "
-                  f"Vol={signal_data.get('s2_volume',False)} "
-                  f"EMA200={signal_data.get('s3_ema200',False)} "
-                  f"EMA50={signal_data.get('s4_ema50',False)})")
-        else:
-            print(f"  [DIAG] Signal=NONE")
-        if signal_data is None and _row["ADX"] < 18.0:
-            print(f"  [DIAG] Blocked by: ADX too low ({_row['ADX']:.2f} < 18.0)")
-        if signal_data is None and _atr_ratio < 0.50:
-            print(f"  [DIAG] Blocked by: ATR compression ({_atr_ratio:.2f} < 0.50)")
 
     # -------------------------------------------------------------------
     # Stop-loss — always checked first, no gate bypasses this
@@ -1417,27 +1444,16 @@ for symbol in COINS:
             print()
             continue
 
-        print(f"  📋 Candidate queued — score={score}/5  ADX={adx:.1f}  "
-              f"(will rank against other candidates before entering)")
         entry_candidates.append((symbol, signal_data, df))
-        # Queued as candidate — entry handled in Step 3B ranked pass.
         pass
 
     elif position is None and mr_signal_data is not None:
-        # Lane 2: no momentum signal fired but MR did — queue for entry.
-        # MR entries are always lower priority than momentum entries.
-        # They use 'soft_confirmations': 0 so they rank last if both fire
-        # on different coins in the same run.
-        print(f"  📋 MR candidate queued — will enter if slot available after "
-              f"momentum candidates.")
         entry_candidates.append((symbol, mr_signal_data, df))
 
     elif position is not None and signal_dir == position['Side']:
-        print(f"  Holding {position['Side']} (signal agrees, no action).")
+        pass   # status already shown on header line
 
-    # Only add blank line if header was printed
-    if position is not None or signal_data is not None:
-        print()
+    print()  # blank line after every coin
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
