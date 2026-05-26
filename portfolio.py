@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from config import INITIAL_CAPITAL, DATA_DIR
 
@@ -8,11 +9,13 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 portfolio_file = f"{DATA_DIR}/portfolio.csv"
 
+IST = ZoneInfo("Asia/Kolkata")
+
 
 def initialize_portfolio():
     if not os.path.exists(portfolio_file):
         df = pd.DataFrame([{
-            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
             "Cash": INITIAL_CAPITAL,
             "Equity": INITIAL_CAPITAL,
             "Open Positions": 0,
@@ -40,7 +43,7 @@ def log_portfolio(
     events_str = " | ".join(events) if events else ""
 
     new_row = {
-        "Timestamp":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Timestamp":      datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
         "Cash":           round(cash, 2),
         "Equity":         round(equity, 2),
         "Open Positions": open_positions,
