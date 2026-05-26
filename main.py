@@ -553,7 +553,7 @@ _save_prev_regime(btc_regime)
 #
 # This fixes entry-order bias: previously the first 5 coins in the list
 # would always win when >5 signals fired simultaneously. Now the highest-
-# conviction signal (score 4/4, tiebreak by ADX) enters first regardless
+# conviction signal (score 5/5, tiebreak by ADX) enters first regardless
 # of list position.
 #
 # Ranking key: (soft_confirmations DESC, adx DESC)
@@ -641,7 +641,7 @@ for symbol in COINS:
         if signal_data:
             ct = signal_data.get('counter_trend', False)
             print(f"  [DIAG] Signal={signal_dir}  CounterTrend={ct}  "
-                  f"Score={signal_data['soft_confirmations']}/4  "
+                  f"Score={signal_data['soft_confirmations']}/5  "
                   f"(RSI={signal_data.get('s1_rsi',False)} "
                   f"Vol={signal_data.get('s2_volume',False)} "
                   f"EMA200={signal_data.get('s3_ema200',False)} "
@@ -1070,7 +1070,7 @@ for symbol in COINS:
     # Tier 5 — Signal deterioration exit
     # -------------------------------------------------------------------
     # If the 1H signal that caused entry has materially reversed — score
-    # dropped to SIGNAL_EXIT_THRESHOLD (≤1/4) — exit immediately.
+    # dropped to SIGNAL_EXIT_THRESHOLD (≤1/5) — exit immediately.
     # No point holding a position whose entry thesis is gone.
     # Uses the already-fetched signal_data so zero extra API calls.
     # -------------------------------------------------------------------
@@ -1093,7 +1093,7 @@ for symbol in COINS:
             s3 = signal_data.get('s3_ema200', False)
             s4 = signal_data.get('s4_ema50', False)
             run_events.append(f"{symbol} {pnl:+.2f} SIG_DETN")
-            print(f"  📉 SIGNAL DETERIORATION exit — score dropped to {current_score}/4 "
+            print(f"  📉 SIGNAL DETERIORATION exit — score dropped to {current_score}/5 "
                   f"(RSI={s1} Vol={s2} EMA200={s3} EMA50={s4}) | PnL: {pnl:.2f}")
 
             log_trade(symbol, {
@@ -1210,7 +1210,7 @@ for symbol in COINS:
 
         # 4B — stuck profitable: Tier 1 never fired, take small gain
         # Signal-aware: only exit if signal has weakened to <= 2/4.
-        # If signal is still 3/4 or 4/4, hold — coin is still trending.
+        # If signal is still 3/5 or 4/5, hold — coin is still trending.
         # Selling a strong-signal position just to re-enter at a higher
         # price creates unnecessary tax events in live trading.
         _current_score = signal_data.get('soft_confirmations', 0) if signal_data else 0
@@ -1221,7 +1221,7 @@ for symbol in COINS:
                 and _signal_weak:
             tier4_exit   = True
             tier4_reason = (f"TIME_EXIT_STUCK_PROFIT ({hours_held:.1f}h, "
-                            f"move={move_pct:.2%}, score={_current_score}/4)")
+                            f"move={move_pct:.2%}, score={_current_score}/5)")
 
         # 4C — trailing half timeout
         if not tier4_exit and already_partial                 and hours_held >= TIME_EXIT_TRAIL_HOURS:
@@ -1330,7 +1330,7 @@ for symbol in COINS:
                     )
                     if regime_override:
                         print(f"  ⚡ BTC regime SHORT overridden — "
-                              f"coin score {coin_score}/4, corr={coin_corr:.2f}, not counter-trend.")
+                              f"coin score {coin_score}/5, corr={coin_corr:.2f}, not counter-trend.")
                     elif not corr_allows:
                         print(f"  🚫 BTC regime SHORT — blocked (corr={coin_corr:.2f} > {REGIME_OVERRIDE_MAX_CORR}). "
                               f"Too correlated to BTC to trade in bear market.")
@@ -1391,7 +1391,7 @@ for symbol in COINS:
         # Counter-trend entries need higher confirmation than trend entries.
         # Below EMA200 + weak score = too risky. Filter before queuing.
         if is_ct and score < CT_SOFT_REQUIRED:
-            print(f"  🚫 CT score too low — score={score}/4 < {CT_SOFT_REQUIRED} required for counter-trend. Blocked.")
+            print(f"  🚫 CT score too low — score={score}/5 < {CT_SOFT_REQUIRED} required for counter-trend. Blocked.")
             print()
             continue
 
@@ -1417,7 +1417,7 @@ for symbol in COINS:
             print()
             continue
 
-        print(f"  📋 Candidate queued — score={score}/4  ADX={adx:.1f}  "
+        print(f"  📋 Candidate queued — score={score}/5  ADX={adx:.1f}  "
               f"(will rank against other candidates before entering)")
         entry_candidates.append((symbol, signal_data, df))
         # Queued as candidate — entry handled in Step 3B ranked pass.
@@ -1473,8 +1473,8 @@ if entry_candidates:
     if not market_ok:
         # Split candidates into three buckets:
         #   1. MR entries        — always allowed (counter-trend by design)
-        #   2. 4/4 score entries — allowed (coin trending independently, max conviction)
-        #   3. 3/4 and below    — blocked (market too weak for lower-conviction entries)
+        #   2. 4/5 score entries — allowed (coin trending independently, max conviction)
+        #   3. 3/5 and below    — blocked (market too weak for lower-conviction entries)
         mr_candidates      = [(s, d, f) for s, d, f in entry_candidates
                               if d.get("signal") == "MR_LONG"]
         highconv_candidates = [(s, d, f) for s, d, f in entry_candidates
@@ -1487,11 +1487,11 @@ if entry_candidates:
         if blocked_candidates:
             blocked = [s for s, _, _ in blocked_candidates]
             print(f"  🚫 Market health FAIL — blocking {len(blocked_candidates)} "
-                  f"entry/entries (score < 4/4): {blocked}")
+                  f"entry/entries (score < 4/5): {blocked}")
 
         if highconv_candidates:
             allowed = [s for s, _, _ in highconv_candidates]
-            print(f"  ⚡ 4/4 score override — entering despite weak market: {allowed}")
+            print(f"  ⚡ 4/5 score override — entering despite weak market: {allowed}")
 
         if mr_candidates:
             print(f"  ✅ MR entries bypass market health gate: "
@@ -1504,7 +1504,7 @@ if entry_candidates:
 # Step 3B: Ranked entry — enter best candidates first
 # ---------------------------------------------------------------------------
 # Sort all entry candidates by:
-#   1. soft_confirmations DESC (4/4 before 3/4 before 2/4)
+#   1. soft_confirmations DESC (5/5 before 4/5 before 3/5)
 #   2. ADX DESC as tiebreaker (stronger trend gets priority)
 #
 # Then run Gate 3 (position count) and capital guard in rank order.
@@ -1524,7 +1524,7 @@ if entry_candidates:
     print()
     print(f"--- Entry Ranking ({len(entry_candidates)} candidate(s)) ---")
     for rank, (sym, sig, _) in enumerate(entry_candidates, 1):
-        print(f"  #{rank} {sym:<14} score={sig.get('soft_confirmations',0)}/4  "
+        print(f"  #{rank} {sym:<14} score={sig.get('soft_confirmations',0)}/5  "
               f"ADX={sig.get('adx',0):.1f}  "
               f"CT={'yes' if sig.get('counter_trend') else 'no'}")
     print()
@@ -1553,9 +1553,9 @@ if entry_candidates:
             continue
 
         # Score-based allocation: higher conviction = more capital
-        #   4/4 → 10%  (RISK_PER_TRADE_HIGH)
-        #   3/4 → 8%   (RISK_PER_TRADE)
-        #   2/4 → 5%   (RISK_PER_TRADE_LOW)
+        #   5/5 or 4/5 → 10%  (RISK_PER_TRADE_HIGH)
+        #   3/5 → 8%   (RISK_PER_TRADE)
+        #   2/5 → 5%   (RISK_PER_TRADE_LOW)
         _score = signal_data.get('soft_confirmations', 0)
         if _score >= 4:
             _risk_rate = RISK_PER_TRADE_HIGH
@@ -1597,7 +1597,7 @@ if entry_candidates:
                 _bypass = "flat" in mom_reason.lower() or "falling" in mom_reason.lower()
                 if _bypass and "too low" not in mom_reason.lower():
                     mom_ok = True
-                    mom_reason = mom_reason + " [bypassed — 4/4 signal]"
+                    mom_reason = mom_reason + " [bypassed — 4/5 signal]"
             if VERBOSE_DIAG or not mom_ok:
                 print(f"  [15min] {mom_reason}")
             if not mom_ok:
@@ -1660,7 +1660,7 @@ if entry_candidates:
         entry_label = "MR_LONG" if is_mr else signal_dir
         run_events.append(f"{symbol} ENTRY {entry_label}")
         print(f"  ✅ Entered {entry_label} @ {latest_price:.4f}")
-        print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f} | Risk={_risk_rate:.0%} (score={_score}/4)")
+        print(f"     Alloc=₹{allocation:.2f} | Qty={quantity:.6f} | Risk={_risk_rate:.0%} (score={_score}/5)")
         if is_mr:
             print(f"     Drop={signal_data['drop_pct']:.1f}%  RSI={signal_data['rsi']:.1f}  "
                   f"TP=+{signal_data['mr_tp_pct']*100:.0f}%  SL=-{signal_data['mr_sl_pct']*100:.0f}%  "
@@ -1669,7 +1669,7 @@ if entry_candidates:
             mode_label = "LONG-only" if LONG_ONLY else "LONG+SHORT"
             ct_label   = " | ⚠️  COUNTER-TREND (tighter exits)" if signal_data.get('counter_trend') else ""
             print(f"     ADX={signal_data['adx']:.1f} | RSI={signal_data['rsi']:.1f} | "
-                  f"Confirmations={signal_data['soft_confirmations']}/4 | "
+                  f"Confirmations={signal_data['soft_confirmations']}/5 | "
                   f"BTC_Regime={btc_regime or 'NEUTRAL'} | Mode={mode_label}{ct_label}")
             if signal_data.get('counter_trend'):
                 print(f"     TP={effective_tp:.1%} | Trail={effective_trail:.1%} (counter-trend targets)")

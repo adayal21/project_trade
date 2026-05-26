@@ -222,13 +222,6 @@ def generate_signal(
     if bool(latest['Squeeze_On']):
         return None
 
-    # 4. Higher High filter: price must be breaking upward at entry
-    # Current close must be above the highest close of the previous 3 bars.
-    # This blocks pullback entries and re-entries into exhausted moves.
-    # Only applied to LONG signals — confirms price is making new highs.
-    if pd.isna(latest['Prev3_High']) or not bool(latest['Higher_High']):
-        return None
-
     # ------------------------------------------------------------------
     # Directional conditions
     # ------------------------------------------------------------------
@@ -250,15 +243,24 @@ def generate_signal(
 
     supertrend_long = latest['Supertrend']                        # MANDATORY
 
-    # Soft conditions
-    s1_rsi     = latest['RSI'] > 52                               # momentum level
-    s2_volume  = latest['Volume'] > latest['Volume_Baseline']     # participation
-    s3_ema200  = latest['Close'] > latest['EMA200']               # macro trend
-    s4_ema50   = latest['Close'] > latest['EMA50']                # local trend
+    # Soft conditions — need LONG_SOFT_REQUIRED of 5 to enter
+    #   S1. RSI > 52          — momentum above midpoint
+    #   S2. Volume > Baseline — above-median participation
+    #   S3. Close > EMA200    — macro trend alignment
+    #   S4. Close > EMA50     — local trend alignment
+    #   S5. Higher High       — price breaking upward (not pulling back)
+    #                           Counts as bonus confirmation when price is
+    #                           genuinely breaking out vs consolidating.
+    s1_rsi        = latest['RSI'] > 52
+    s2_volume     = latest['Volume'] > latest['Volume_Baseline']
+    s3_ema200     = latest['Close'] > latest['EMA200']
+    s4_ema50      = latest['Close'] > latest['EMA50']
+    s5_higher_high = (not pd.isna(latest['Prev3_High'])
+                      and bool(latest['Higher_High']))
 
-    long_soft_score = int(s1_rsi) + int(s2_volume) + int(s3_ema200) + int(s4_ema50)
+    long_soft_score = int(s1_rsi) + int(s2_volume) + int(s3_ema200) + int(s4_ema50) + int(s5_higher_high)
     long_condition  = supertrend_long and long_soft_score >= LONG_SOFT_REQUIRED
-    counter_trend   = long_condition and not s3_ema200            # bounce against macro
+    counter_trend   = long_condition and not s3_ema200
 
     # --- SHORT ---
     # In LONG_ONLY mode, SHORT signals are suppressed entirely — no short
@@ -292,15 +294,15 @@ def generate_signal(
             "atr":               latest['ATR'],
             "supertrend_lower":  latest['Supertrend_Lower'],
             "supertrend_upper":  latest['Supertrend_Upper'],
-            "soft_confirmations": long_soft_score,   # 1-4
-            "counter_trend":     counter_trend,      # True = bounce against EMA200
+            "soft_confirmations": long_soft_score,   # 1-5
+            "counter_trend":     counter_trend,
             "s1_rsi":            s1_rsi,
             "s2_volume":         s2_volume,
             "s3_ema200":         s3_ema200,
             "s4_ema50":          s4_ema50,
-            "higher_high":       bool(latest['Higher_High']),
+            "s5_higher_high":    s5_higher_high,
             "squeeze_on":        bool(latest['Squeeze_On']),
-            "prev3_high":        float(latest['Prev3_High']),
+            "prev3_high":        float(latest['Prev3_High']) if not pd.isna(latest['Prev3_High']) else 0.0,
         }
 
     if short_condition and not LONG_ONLY:
