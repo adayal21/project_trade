@@ -1,19 +1,18 @@
 """
-exchange.py — CoinDCX live execution layer.
+exchange.py — CoinDCX live execution layer (USDT pairs).
 
-This module provides all live trading operations needed by main.py.
-It is only called when TRADING_MODE = "live" in config.py.
-In paper mode, none of these functions are called.
+Called only when TRADING_MODE = "live" in config.py.
+In paper mode, none of these functions are invoked.
 
 Functions
 ---------
-get_live_inr_balance()         → float (available INR)
-get_live_holdings()            → dict  {symbol: quantity}
-reconcile_positions(coins)     → dict  of corrections made
-place_market_order(symbol, side, quantity_or_amount) → order_id or None
-get_order_status(order_id)     → dict
-cancel_order(order_id)         → bool
-run_connectivity_test()        → prints diagnostics, does NOT place real orders
+get_live_usdt_balance()          → float  (available USDT)
+get_live_holdings()              → dict   {symbol: quantity}
+reconcile_positions(...)         → dict   of corrections made
+place_market_order(symbol, side, quantity) → order_id or None
+get_order_status(order_id)       → dict
+cancel_order(order_id)           → bool
+run_connectivity_test(coins)     → prints diagnostics, no real orders placed
 """
 
 import time
@@ -26,30 +25,30 @@ from coindcx_auth import signed_post
 
 def _order_symbol(symbol: str) -> str:
     """
-    Map internal symbol format to CoinDCX order market format.
-    'BTC/INR' → 'BTCINR'
-    'SHIB/INR' → 'SHIBINR'
+    Map internal symbol to CoinDCX order market format.
+    'BTC/USDT' → 'BTCUSDT'
+    'ADA/USDT' → 'ADAUSDT'
     """
     return symbol.replace("/", "")
 
 
-def _holdings_symbol(market: str) -> str:
+def _holdings_symbol(currency: str) -> str:
     """
-    Map CoinDCX balance currency to our internal format.
-    CoinDCX returns balances per currency (e.g. 'BTC', 'ETH').
-    We map back: 'BTC' → 'BTC/INR'
+    Map CoinDCX balance currency back to internal format.
+    'BTC' → 'BTC/USDT'
+    'ADA' → 'ADA/USDT'
     """
-    return f"{market}/INR"
+    return f"{currency}/USDT"
 
 
 # ---------------------------------------------------------------------------
 # Balance
 # ---------------------------------------------------------------------------
 
-def get_live_inr_balance() -> float:
+def get_live_usdt_balance() -> float:
     """
-    Fetch available INR balance from CoinDCX account.
-    Returns 0.0 on failure (logged).
+    Fetch available USDT balance from CoinDCX account.
+    Returns 0.0 on failure.
     """
     try:
         r = signed_post("/exchange/v1/users/balances", {})
@@ -67,20 +66,23 @@ def get_live_inr_balance() -> float:
         print(f"  [exchange] Balance JSON parse failed: {e}")
         return 0.0
 
-    # Response is a list of {"currency": "INR", "balance": "1000.00", ...}
     for entry in balances:
-        if entry.get("currency") == "INR":
+        if entry.get("currency") == "USDT":
             return float(entry.get("balance", 0))
 
-    print("  [exchange] INR not found in balance response")
+    print("  [exchange] USDT not found in balance response")
     return 0.0
 
+
+# ---------------------------------------------------------------------------
+# Holdings
+# ---------------------------------------------------------------------------
 
 def get_live_holdings() -> dict[str, float]:
     """
     Fetch all non-zero crypto holdings from CoinDCX account.
-    Returns {symbol: quantity} e.g. {'BTC/INR': 0.0005, 'ETH/INR': 0.12}
-    Only returns currencies that have a positive balance.
+    Returns {symbol: quantity} e.g. {'BTC/USDT': 0.0005, 'ADA/USDT': 120.0}
+    Skips USDT itself and any zero/dust balances.
     """
     try:
         r = signed_post("/exchange/v1/users/balances", {})
@@ -102,10 +104,10 @@ def get_live_holdings() -> dict[str, float]:
     for entry in balances:
         currency = entry.get("currency", "")
         balance  = float(entry.get("balance", 0))
-        if currency == "INR" or balance <= 0:
+        # Skip quote currency and dust
+        if currency in ("USDT", "INR") or balance <= 0.0001:
             continue
-        symbol = _holdings_symbol(currency)
-        holdings[symbol] = balance
+        holdings[_holdings_symbol(currency)] = balance
 
     return holdings
 
@@ -114,58 +116,51 @@ def get_live_holdings() -> dict[str, float]:
 # Reconciliation
 # ---------------------------------------------------------------------------
 
-def reconcile_positions(coins: list, load_position_fn, save_position_fn,
-                        clear_position_fn) -> dict:
+def reconcile_positions(
+    coins: list,
+    load_position_fn,
+    save_position_fn,
+    clear_position_fn,
+) -> dict:
     """
     Compare local position CSVs with actual CoinDCX holdings.
     Ground truth is always the exchange — local files are updated to match.
 
-    Returns a dict of corrections made:
-    {
-      'added':   [symbols where exchange has holding but CSV is missing],
-      'removed': [symbols where CSV says open but exchange has no holding],
-      'ok':      [symbols where CSV and exchange agree],
-    }
-
-    This prevents the classic bot disaster: local state says flat,
-    exchange says we hold 0.5 BTC, bot buys more, now double-exposed.
+    Returns a dict:
+        added   : symbols where exchange has holding but CSV is missing
+        removed : symbols where CSV says open but exchange has no holding
+        ok      : symbols where CSV and exchange agree
     """
-    corrections = {'added': [], 'removed': [], 'ok': []}
-    live_holdings = get_live_holdings()
+    corrections    = {"added": [], "removed": [], "ok": []}
+    live_holdings  = get_live_holdings()
 
     for symbol in coins:
-        if symbol == "BTC/INR":
-            continue   # regime reference, never traded
-
-        local_pos  = load_position_fn(symbol)
-        live_qty   = live_holdings.get(symbol, 0.0)
-        has_local  = local_pos is not None
-        has_live   = live_qty > 0.0001   # small dust threshold
+        local_pos = load_position_fn(symbol)
+        live_qty  = live_holdings.get(symbol, 0.0)
+        has_local = local_pos is not None
+        has_live  = live_qty > 0.0001
 
         if has_local and has_live:
-            # Both agree we have a position — update quantity to match exchange
+            # Both agree — update quantity to match exchange
             actual_qty = live_qty
-            if abs(float(local_pos.get('Quantity', 0)) - actual_qty) > 0.0001:
-                local_pos['Quantity'] = actual_qty
+            if abs(float(local_pos.get("Quantity", 0)) - actual_qty) > 0.0001:
+                local_pos["Quantity"] = actual_qty
                 save_position_fn(symbol, local_pos)
-                print(f"  [reconcile] {symbol}: quantity updated to {actual_qty:.6f} (exchange)")
-            corrections['ok'].append(symbol)
+                print(f"  [reconcile] {symbol}: qty updated to {actual_qty:.6f}")
+            corrections["ok"].append(symbol)
 
         elif has_local and not has_live:
-            # Local says open, exchange says flat — position was closed externally
+            # Local says open, exchange says flat — closed externally
             print(f"  [reconcile] {symbol}: local position removed "
                   f"(exchange shows no holding)")
             clear_position_fn(symbol)
-            corrections['removed'].append(symbol)
+            corrections["removed"].append(symbol)
 
         elif not has_local and has_live:
-            # Exchange has a holding but no local position CSV
-            # This can happen after a crash or manual trade
-            # Log it but don't auto-create a position — too risky to assume
-            # entry price and direction without that context
+            # Exchange has holding, no local CSV — manual trade or crash
             print(f"  [reconcile] {symbol}: exchange holds {live_qty:.6f} "
-                  f"but no local position found. Manual check required.")
-            corrections['added'].append(symbol)
+                  f"but no local position. Manual check required.")
+            corrections["added"].append(symbol)
 
     return corrections
 
@@ -175,21 +170,21 @@ def reconcile_positions(coins: list, load_position_fn, save_position_fn,
 # ---------------------------------------------------------------------------
 
 def place_market_order(
-    symbol:    str,
-    side:      str,     # "buy" or "sell"
-    quantity:  float,
-    dry_run:   bool = False,
+    symbol:   str,
+    side:     str,    # "buy" or "sell"
+    quantity: float,
+    dry_run:  bool = False,
 ) -> str | None:
     """
     Place a market order on CoinDCX.
 
     Parameters
     ----------
-    symbol   : internal format e.g. 'BTC/INR'
+    symbol   : internal format e.g. 'BTC/USDT'
     side     : 'buy' or 'sell'
-    quantity : quantity in base currency (BTC for BTC/INR)
-    dry_run  : if True, logs the order but does NOT send it to the exchange.
-               Used for connectivity testing and validation.
+    quantity : quantity in base currency (BTC for BTC/USDT)
+    dry_run  : if True, logs the order but does NOT send to exchange.
+               Use for connectivity testing.
 
     Returns
     -------
@@ -202,13 +197,11 @@ def place_market_order(
         "side":            side.lower(),
         "order_type":      "market_order",
         "total_quantity":  quantity,
-        "client_order_id": f"bot_{market}_{side}_{int(time.time())}",
+        "client_order_id": f"hma_{market}_{side}_{int(time.time())}",
     }
 
     if dry_run:
-        print(f"  [exchange] DRY RUN — would place {side.upper()} market order: "
-              f"{quantity:.6f} {market}")
-        print(f"  [exchange] Body: {body}")
+        print(f"  [exchange] DRY RUN — {side.upper()} {quantity:.6f} {market}")
         return "DRY_RUN_ORDER_ID"
 
     try:
@@ -220,21 +213,22 @@ def place_market_order(
     if r.status_code == 200:
         try:
             data     = r.json()
-            order_id = data.get("id") or data.get("order_id") or data.get("orders", [{}])[0].get("id")
-            print(f"  [exchange] Order placed: {side.upper()} {quantity:.6f} {market} "
+            order_id = (data.get("id")
+                        or data.get("order_id")
+                        or data.get("orders", [{}])[0].get("id"))
+            print(f"  [exchange] {side.upper()} {quantity:.6f} {market} "
                   f"→ order_id={order_id}")
             return str(order_id)
         except Exception as e:
-            print(f"  [exchange] Order response parse failed: {e} | raw: {r.text[:300]}")
+            print(f"  [exchange] Response parse failed: {e} | {r.text[:300]}")
             return None
 
     elif r.status_code == 400:
-        # Common: insufficient balance, min order size not met
         print(f"  [exchange] Order rejected (400): {r.text[:300]}")
         return None
 
     elif r.status_code == 401:
-        print(f"  [exchange] Order auth failed (401) — check API key/secret")
+        print(f"  [exchange] Auth failed (401) — check API key/secret")
         return None
 
     else:
@@ -244,18 +238,19 @@ def place_market_order(
 
 def get_order_status(order_id: str) -> dict:
     """
-    Fetch status of a specific order.
-    Returns the order dict, or {} on failure.
+    Fetch status of a specific order. Returns {} on failure.
 
-    Key fields in response:
-      status          : 'filled', 'partially_filled', 'cancelled', 'open'
-      avg_price       : average fill price
-      total_quantity  : quantity ordered
-      remaining_quantity : unfilled quantity
+    Key fields:
+        status             : 'filled' | 'partially_filled' | 'cancelled' | 'open'
+        avg_price          : average fill price
+        total_quantity     : quantity ordered
+        remaining_quantity : unfilled quantity
     """
     if order_id == "DRY_RUN_ORDER_ID":
-        return {"status": "filled", "avg_price": 0, "total_quantity": 0,
-                "remaining_quantity": 0, "dry_run": True}
+        return {
+            "status": "filled", "avg_price": 0,
+            "total_quantity": 0, "remaining_quantity": 0,
+        }
 
     try:
         r = signed_post("/exchange/v1/orders/status", {"id": order_id})
@@ -275,9 +270,7 @@ def get_order_status(order_id: str) -> dict:
 
 
 def cancel_order(order_id: str) -> bool:
-    """
-    Cancel an open order. Returns True if successful, False otherwise.
-    """
+    """Cancel an open order. Returns True if successful."""
     if order_id == "DRY_RUN_ORDER_ID":
         return True
 
@@ -288,7 +281,7 @@ def cancel_order(order_id: str) -> bool:
         return False
 
     if r.status_code == 200:
-        print(f"  [exchange] Order {order_id} cancelled successfully")
+        print(f"  [exchange] Order {order_id} cancelled")
         return True
     else:
         print(f"  [exchange] Cancel error {r.status_code}: {r.text[:200]}")
@@ -296,78 +289,72 @@ def cancel_order(order_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Connectivity test — safe to run anytime, never places real orders
+# Connectivity test — safe to run anytime, no real orders placed
 # ---------------------------------------------------------------------------
 
 def run_connectivity_test(coins: list) -> None:
     """
-    Tests the full live trading integration WITHOUT placing any real orders.
+    Tests the full live trading integration without placing real orders.
 
-    What it checks:
-      1. API credentials are present and valid
-      2. INR balance is readable
-      3. Current holdings are readable
-      4. Order placement API is reachable (dry run only — no real order)
-      5. Order status API is reachable
-      6. Symbol formats are correct for all coins
+    Checks:
+      1. API credentials present and valid
+      2. USDT balance readable
+      3. Current holdings readable
+      4. Symbol formats correct for all coins
+      5. Order API reachable (dry run only)
 
-    This is safe to run at any time. Use this to verify your API keys
-    work before switching TRADING_MODE to "live".
+    Run this before switching TRADING_MODE to 'live'.
     """
-    print("=" * 60)
-    print("CoinDCX Live Trading Connectivity Test")
-    print("(DRY RUN — no real orders will be placed)")
-    print("=" * 60)
+    print("=" * 58)
+    print("  CoinDCX Live Connectivity Test")
+    print("  (DRY RUN — no real orders placed)")
+    print("=" * 58)
 
-    # Test 1: Credentials present
+    # 1. Credentials
     print("\n[1/5] Checking credentials...")
     try:
         from coindcx_auth import _get_credentials
         key, secret = _get_credentials()
-        print(f"  ✓ API key found: {key[:8]}...{key[-4:]}")
-        print(f"  ✓ API secret found: {'*' * 20}")
+        print(f"  ✓ API key    : {key[:8]}...{key[-4:]}")
+        print(f"  ✓ API secret : {'*' * 20}")
     except EnvironmentError as e:
         print(f"  ✗ {e}")
         print("  Cannot continue — credentials missing.")
         return
 
-    # Test 2: INR balance
-    print("\n[2/5] Fetching INR balance...")
-    inr = get_live_inr_balance()
-    if inr > 0:
-        print(f"  ✓ INR balance: ₹{inr:.2f}")
-    elif inr == 0.0:
-        print(f"  ⚠️  INR balance is ₹0.00 — account may be empty or API returned error")
-        print(f"     (This is expected if you have not deposited yet)")
+    # 2. USDT balance
+    print("\n[2/5] Fetching USDT balance...")
+    usdt = get_live_usdt_balance()
+    if usdt > 0:
+        print(f"  ✓ USDT balance: ${usdt:.2f}")
+    else:
+        print(f"  ⚠  USDT balance is $0.00 — deposit USDT before going live")
 
-    # Test 3: Holdings
+    # 3. Holdings
     print("\n[3/5] Fetching current holdings...")
     holdings = get_live_holdings()
     if holdings:
         for sym, qty in holdings.items():
-            print(f"  ✓ Holding: {sym} → {qty:.6f}")
+            print(f"  ✓ {sym}: {qty:.6f}")
     else:
-        print(f"  ✓ No crypto holdings (clean account — ready to trade)")
+        print(f"  ✓ No crypto holdings — account clean and ready")
 
-    # Test 4: Symbol format check
-    print("\n[4/5] Checking symbol formats for all coins...")
-    tradeable = [c for c in coins if c != "BTC/INR"]
-    for symbol in tradeable:
-        order_sym = _order_symbol(symbol)
-        print(f"  {symbol:<12} → order market: {order_sym}")
+    # 4. Symbol formats
+    print("\n[4/5] Checking symbol formats...")
+    for symbol in coins:
+        print(f"  {symbol:<14} → order market: {_order_symbol(symbol)}")
 
-    # Test 5: Dry-run order (no real order placed)
-    print("\n[5/5] Dry-run order test (NOT a real order)...")
-    test_symbol = "BTC/INR"
-    order_id = place_market_order(test_symbol, "buy", 0.000001, dry_run=True)
-    if order_id:
-        print(f"  ✓ Dry-run order construction successful")
+    # 5. Dry-run order
+    print("\n[5/5] Dry-run order test (NOT real)...")
+    oid = place_market_order(coins[0], "buy", 0.000001, dry_run=True)
+    if oid:
+        print(f"  ✓ Order construction OK")
 
-    print("\n" + "=" * 60)
-    print("Connectivity test complete.")
-    if inr >= 100:
-        print(f"✓ Account ready for live trading (₹{inr:.2f} available)")
+    print("\n" + "=" * 58)
+    print("  Connectivity test complete.")
+    if usdt >= 10:
+        print(f"  ✓ Ready for live trading (${usdt:.2f} USDT available)")
     else:
-        print(f"⚠️  Deposit INR to your CoinDCX account before enabling live trading")
-    print("To enable live trading: set TRADING_MODE = 'live' in config.py")
-    print("=" * 60)
+        print(f"  ⚠  Deposit USDT to CoinDCX before enabling live mode")
+    print("  To go live: set TRADING_MODE=live in config.py or .env")
+    print("=" * 58)
