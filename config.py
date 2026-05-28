@@ -63,13 +63,39 @@ DATA_DIR = "data"
 #               maps to "KC-COIN_USDT" for CoinDCX candles API
 #               maps to "COINUSDT"     for CoinDCX order API
 
+# Coins are listed in PRIORITY ORDER.
+# When more than MAX_OPEN_POSITIONS signals fire simultaneously,
+# the bot enters the top MAX_OPEN_POSITIONS coins by their rank here
+# (highest Sharpe / most validated first).
+#
+# FLOKI and SHIB were removed — prices below $0.001 cause precision
+# and rounding errors in quantity calculations on CoinDCX.
+#
+# Pair format: "COIN/USDT" internally
+#              maps to "KC-COIN_USDT" for CoinDCX candles API
+#              maps to "COINUSDT"     for CoinDCX order API
+
 COINS = [
-    "BTC/USDT",   # Sharpe 1.13 | +152% | MaxDD -24% | CONFIRMED
-    "ADA/USDT",   # Sharpe 1.05 | +304% | MaxDD -33% | CONFIRMED
-    "DOGE/USDT",  # Sharpe 0.91 | +275% | MaxDD -38% | CONFIRMED
-    "AVAX/USDT",  # Sharpe 0.72 | +159% | MaxDD -45% | CONFIRMED
-    "XRP/USDT",   # Sharpe 0.68 | +136% | MaxDD -37% | CONFIRMED
-    "BNB/USDT",   # Sharpe 0.60 |  +62% | MaxDD -31% | POSITIVE
+    # Rank 1-3: Highest confidence — lowest drawdown or strongest Sharpe
+    "BTC/USDT",    # Rank 1  | Sharpe 1.13 | Ann +24%  | MaxDD -24% | anchor
+    "ZEC/USDT",    # Rank 2  | Sharpe 1.42 | Ann +92%  | MaxDD -53% | best Sharpe
+    "ADA/USDT",    # Rank 3  | Sharpe 1.05 | Ann +39%  | MaxDD -33% | multi-year
+
+    # Rank 4-6: Strong — good Sharpe, multi-year history
+    "FET/USDT",    # Rank 4  | Sharpe 0.96 | Ann +50%  | MaxDD -59% | AI sector
+    "DOGE/USDT",   # Rank 5  | Sharpe 0.91 | Ann +37%  | MaxDD -38% | proven
+    "JASMY/USDT",  # Rank 6  | Sharpe 0.90 | Ann +45%  | MaxDD -56% | 4yr consistent
+
+    # Rank 7-8: Solid — MAX_OPEN_POSITIONS boundary
+    "HBAR/USDT",   # Rank 7  | Sharpe 0.74 | Ann +29%  | MaxDD -49% | enterprise
+    "AVAX/USDT",   # Rank 8  | Sharpe 0.72 | Ann +25%  | MaxDD -45% | L1
+
+    # Rank 9-13: Reserve — only enter if top 8 already exited
+    "XRP/USDT",    # Rank 9  | Sharpe 0.68 | Ann +23%  | MaxDD -37% | liquid
+    "BNB/USDT",    # Rank 10 | Sharpe 0.60 | Ann +12%  | MaxDD -31% | exchange
+    "ALGO/USDT",   # Rank 11 | Sharpe 0.55 | Ann +16%  | MaxDD -43% | borderline
+    "SUSHI/USDT",  # Rank 12 | Sharpe 0.54 | Ann +16%  | MaxDD -60% | borderline
+    "SOL/USDT",    # Rank 13 | Sharpe 0.46 | Ann +11%  | MaxDD -42% | borderline
 ]
 
 # ---------------------------------------------------------------------------
@@ -95,8 +121,9 @@ USE_DAILY_LINREG = False    # use 4H LinReg gate, not daily
 # Maximum 5 coins active at once — one slot kept as cash reserve.
 # At most 5 × 20% = 100% deployed, but rarely all fire simultaneously.
 
-ALLOCATION_PCT     = 0.20   # fraction of total equity per trade
-MAX_OPEN_POSITIONS = 5      # max simultaneous open positions
+ALLOCATION_PCT     = 0.10   # 10% per trade — max 8 active = 80% deployed
+MAX_OPEN_POSITIONS = 8      # max simultaneous open positions
+                             # remaining 20% always kept as cash reserve
 POSITION_SIZE      = 0.999  # tiny buffer so rounding never exceeds allocation
 
 # ---------------------------------------------------------------------------
@@ -129,7 +156,7 @@ CANDLES_URL   = "https://public.coindcx.com/market_data/candles"
 TIMEFRAME     = "4h"
 CANDLES_LIMIT = 500          # candles per API request
 INTERVAL_MS   = 14_400_000   # 4 hours in milliseconds
-WARMUP_BARS   = 600          # bars to fetch — HMA(64) needs 200+ for stable signals
+WARMUP_BARS   = 400          # bars to fetch — HMA(64) needs 200+ for stable signals
 
 # ---------------------------------------------------------------------------
 # Telegram notifications (optional)
