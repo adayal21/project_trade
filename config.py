@@ -129,7 +129,7 @@ CANDLES_URL   = "https://public.coindcx.com/market_data/candles"
 TIMEFRAME     = "4h"
 CANDLES_LIMIT = 500          # candles per API request
 INTERVAL_MS   = 14_400_000   # 4 hours in milliseconds
-WARMUP_BARS   = 400          # bars to fetch — HMA(64) needs 200+ for stable signals
+WARMUP_BARS   = 600          # bars to fetch — HMA(64) needs 200+ for stable signals
 
 # ---------------------------------------------------------------------------
 # Telegram notifications (optional)
