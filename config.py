@@ -25,9 +25,11 @@ TRADING_MODE = os.environ.get("TRADING_MODE", "paper")
 # Capital
 # ---------------------------------------------------------------------------
 if TRADING_MODE == "live":
+    # Reads INR balance from CoinDCX — converted to USDT at trade time
+    # Set LIVE_INITIAL_CAPITAL in .env to match your deposit amount in INR
     INITIAL_CAPITAL = float(os.environ.get("LIVE_INITIAL_CAPITAL", "10000"))
 else:
-    INITIAL_CAPITAL = 10_000.0
+    INITIAL_CAPITAL = 10_000.0   # Paper trading virtual capital (INR equivalent)
 
 # ---------------------------------------------------------------------------
 # Data directory

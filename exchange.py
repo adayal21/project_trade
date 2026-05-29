@@ -47,7 +47,10 @@ def _holdings_symbol(currency: str) -> str:
 
 def get_live_usdt_balance() -> float:
     """
-    Fetch available USDT balance from CoinDCX account.
+    Fetch available INR balance from CoinDCX account.
+    CoinDCX automatically converts INR to USDT at trade time
+    so you deposit INR and trade USDT pairs directly.
+    Returns balance in INR (used as capital for position sizing).
     Returns 0.0 on failure.
     """
     try:
@@ -66,11 +69,21 @@ def get_live_usdt_balance() -> float:
         print(f"  [exchange] Balance JSON parse failed: {e}")
         return 0.0
 
+    # Read INR balance — CoinDCX converts INR to USDT at trade execution
+    for entry in balances:
+        if entry.get("currency") == "INR":
+            inr_balance = float(entry.get("balance", 0))
+            print(f"  [exchange] INR balance: Rs {inr_balance:,.2f}")
+            return inr_balance
+
+    # Fallback — check USDT if INR not found
     for entry in balances:
         if entry.get("currency") == "USDT":
-            return float(entry.get("balance", 0))
+            usdt_balance = float(entry.get("balance", 0))
+            print(f"  [exchange] USDT balance: ${usdt_balance:,.2f}")
+            return usdt_balance
 
-    print("  [exchange] USDT not found in balance response")
+    print("  [exchange] No INR or USDT balance found")
     return 0.0
 
 
@@ -322,13 +335,13 @@ def run_connectivity_test(coins: list) -> None:
         print("  Cannot continue — credentials missing.")
         return
 
-    # 2. USDT balance
-    print("\n[2/5] Fetching USDT balance...")
-    usdt = get_live_usdt_balance()
-    if usdt > 0:
-        print(f"  ✓ USDT balance: ${usdt:.2f}")
+    # 2. INR balance
+    print("\n[2/5] Fetching INR balance...")
+    balance = get_live_usdt_balance()
+    if balance > 0:
+        print(f"  ✓ Balance: Rs {balance:,.2f} (INR — converts to USDT at trade time)")
     else:
-        print(f"  ⚠  USDT balance is $0.00 — deposit USDT before going live")
+        print(f"  ⚠  Balance is zero — deposit INR to CoinDCX before going live")
 
     # 3. Holdings
     print("\n[3/5] Fetching current holdings...")
@@ -352,9 +365,9 @@ def run_connectivity_test(coins: list) -> None:
 
     print("\n" + "=" * 58)
     print("  Connectivity test complete.")
-    if usdt >= 10:
-        print(f"  ✓ Ready for live trading (${usdt:.2f} USDT available)")
+    if balance >= 100:
+        print(f"  ✓ Ready for live trading (Rs {balance:,.2f} available)")
     else:
-        print(f"  ⚠  Deposit USDT to CoinDCX before enabling live mode")
+        print(f"  ⚠  Deposit INR to CoinDCX before enabling live mode")
     print("  To go live: set TRADING_MODE=live in config.py or .env")
     print("=" * 58)
