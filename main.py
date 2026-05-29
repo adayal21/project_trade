@@ -113,16 +113,20 @@ def load_portfolio_state() -> dict:
     return {"cash": INITIAL_CAPITAL, "realized_pnl": 0.0, "total_trades": 0}
 
 def current_equity(cash: float, coins_data: dict) -> float:
-    unreal = 0.0
+    """Cash + mark-to-market gain/loss on all open positions."""
+    position_value = 0.0
     for s in COINS:
         for strat in STRATEGIES:
             pos = load_position(s, strat)
             if pos is None:
                 continue
-            px = (float(coins_data[s]["Close"].iloc[-1])
-                  if s in coins_data else float(pos["Entry Price"]))
-            unreal += float(pos["Quantity"]) * px
-    return cash + unreal
+            ep = float(pos["Entry Price"])
+            qty= float(pos["Quantity"])
+            cp = (float(coins_data[s]["Close"].iloc[-1])
+                  if s in coins_data else ep)
+            # Current market value of position (not gain — full value)
+            position_value += qty * cp
+    return cash + position_value
 
 
 # =============================================================================
@@ -463,9 +467,10 @@ for s in COINS:
         pos = load_position(s, strat)
         if pos is None:
             continue
-        ep = float(pos["Entry Price"])
-        qty= float(pos["Quantity"])
-        cp = float(coins_data[s]["Close"].iloc[-1]) if s in coins_data else ep
+        ep  = float(pos["Entry Price"])
+        qty = float(pos["Quantity"])
+        cp  = float(coins_data[s]["Close"].iloc[-1]) if s in coins_data else ep
+        # Unrealized PnL = (current price - entry price) x quantity
         unrealized += (cp - ep) * qty
 
 log_portfolio(
@@ -502,7 +507,7 @@ if open_count > 0:
             bars = int(pos.get("Bars_Held", 0))
             cp   = float(coins_data[s]["Close"].iloc[-1]) if s in coins_data else ep
             move = (cp - ep) / ep
-            pnl  = move * ep * qty
+            pnl  = (cp - ep) * qty   # unrealized PnL = price diff x qty
             sign = "+" if pnl >= 0 else ""
             sig  = all_signals.get((s, strat))
 
@@ -510,7 +515,7 @@ if open_count > 0:
             print(f"    Entry    : ${ep:.4f}")
             print(f"    Current  : ${cp:.4f}")
             print(f"    Move     : {move:+.2%}")
-            print(f"    PnL      : {sign}${pnl:.4f}")
+            print(f"    Unrealized PnL: {sign}${abs(pnl):.4f}")
             print(f"    Bars held: {bars}")
             if sig:
                 if strat == "ichimoku":
