@@ -1,15 +1,13 @@
 """
-bot_utils.py — Data fetching + signal computation for the HMA 4H Trend Bot.
+bot_utils.py — Data fetching + signal computation for the Combined Bot.
 
-This file wraps the YouTuber's utils.py (indicator library).
-Nothing here duplicates or replaces utils.py logic.
+Both HMA and Ichimoku run independently on ALL 15 coins.
+Each strategy can open its own separate position on the same coin.
 
-Responsibilities:
-    1. Fetch 4H OHLCV candles from CoinDCX public API
-    2. Remove corrupt candles (CoinDCX occasionally produces bad ticks)
-    3. Compute indicators via utils.prepare_dataset() — unchanged
-    4. Return entry_long / exit_long signal state for latest bar
-    5. Send Telegram notifications
+Functions:
+    fetch_candles(symbol)              → OHLCV DataFrame from CoinDCX
+    compute_hma_signals(symbol, df)    → HMA signal dict
+    compute_ichimoku_signals(symbol, df) → Ichimoku signal dict
 """
 
 from __future__ import annotations
@@ -17,36 +15,33 @@ from __future__ import annotations
 import time
 import requests
 import pandas as pd
+import numpy as np
 from datetime import datetime, timezone
-from typing import Optional
 
-import utils   # YouTuber's indicator library — do not modify
+import utils   # YouTuber's HMA indicator library — do not modify
 
 from config import (
     CANDLES_URL, TIMEFRAME, CANDLES_LIMIT, INTERVAL_MS, WARMUP_BARS,
     HMA_FAST, HMA_SLOW, RSI_PERIOD, RSI_THRESHOLD,
     LINREG_LENGTH, HMA_HALF_MODE, HMA_SQRT_MODE,
     USE_SMA, USE_DAILY_LINREG,
-    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
-    VERBOSE,
+    ICHI_TENKAN, ICHI_KIJUN, ICHI_SENKOU,
+    TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, VERBOSE,
 )
 
-# Minimum bars required after warmup for stable signals
-_MIN_BARS = 200
+_MIN_BARS_HMA  = 200
+_MIN_BARS_ICHI = ICHI_SENKOU + ICHI_KIJUN + 10
 
 
 # =============================================================================
-# CoinDCX pair format helpers
+# CoinDCX pair helpers
 # =============================================================================
 
 def _candle_pair(symbol: str) -> str:
-    """'BTC/USDT' → 'KC-BTC_USDT'  (CoinDCX candles API format)"""
     base, quote = symbol.split("/")
     return f"KC-{base}_{quote}"
 
-
 def _order_symbol(symbol: str) -> str:
-    """'BTC/USDT' → 'BTCUSDT'  (CoinDCX orders API format)"""
     return symbol.replace("/", "")
 
 
@@ -55,15 +50,7 @@ def _order_symbol(symbol: str) -> str:
 # =============================================================================
 
 def fetch_candles(symbol: str) -> pd.DataFrame:
-    """
-    Fetch the most recent WARMUP_BARS of 4H candles from CoinDCX.
-
-    Uses a sliding startTime/endTime window to paginate from
-    (now - WARMUP_BARS * 4h) up to now. Returns a clean DataFrame
-    with UTC DatetimeIndex and columns [Open, High, Low, Close, Volume].
-
-    Returns an empty DataFrame on failure — caller must handle that.
-    """
+    """Fetch WARMUP_BARS of 4H candles from CoinDCX public API."""
     pair     = _candle_pair(symbol)
     now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = now_ms - (WARMUP_BARS * INTERVAL_MS)
@@ -74,19 +61,15 @@ def fetch_candles(symbol: str) -> pd.DataFrame:
     while cur < now_ms:
         end_ms = min(cur + CANDLES_LIMIT * INTERVAL_MS, now_ms)
         params = {
-            "pair":      pair,
-            "interval":  TIMEFRAME,
-            "startTime": cur,
-            "endTime":   end_ms,
-            "limit":     CANDLES_LIMIT,
+            "pair": pair, "interval": TIMEFRAME,
+            "startTime": cur, "endTime": end_ms,
+            "limit": CANDLES_LIMIT,
         }
-
         try:
             resp = requests.get(CANDLES_URL, params=params, timeout=20)
         except requests.exceptions.RequestException as e:
             retries += 1
             if retries > 3:
-                print(f"  [{symbol}] fetch failed after 3 retries: {e}")
                 return pd.DataFrame()
             time.sleep(3)
             continue
@@ -94,57 +77,39 @@ def fetch_candles(symbol: str) -> pd.DataFrame:
         if resp.status_code == 429:
             time.sleep(15)
             continue
-
         if resp.status_code != 200:
             retries += 1
             if retries > 3:
-                print(f"  [{symbol}] HTTP {resp.status_code} — giving up")
                 return pd.DataFrame()
             time.sleep(3)
             continue
 
         retries = 0
-
         try:
             candles = resp.json()
-        except Exception as e:
-            print(f"  [{symbol}] JSON parse error: {e}")
+        except Exception:
             return pd.DataFrame()
 
         if isinstance(candles, list) and candles:
             all_rows.extend(candles)
-
         cur = end_ms + INTERVAL_MS
         time.sleep(0.3)
 
     if not all_rows:
-        print(f"  [{symbol}] no candles returned")
         return pd.DataFrame()
 
-    return _parse_candles(symbol, all_rows)
-
-
-def _parse_candles(symbol: str, rows: list) -> pd.DataFrame:
-    """Convert raw CoinDCX candle dicts to a clean OHLCV DataFrame."""
-    df = pd.DataFrame(rows)
-
+    df = pd.DataFrame(all_rows)
     ts_col = next(
-        (c for c in ["time", "timestamp", "open_time", "ts"] if c in df.columns),
+        (c for c in ["time","timestamp","open_time","ts"] if c in df.columns),
         None
     )
     if ts_col is None:
-        print(f"  [{symbol}] no timestamp column — got: {df.columns.tolist()}")
         return pd.DataFrame()
 
     df = df.rename(columns={
-        ts_col:   "timestamp",
-        "open":   "Open",
-        "high":   "High",
-        "low":    "Low",
-        "close":  "Close",
-        "volume": "Volume",
+        ts_col: "timestamp", "open": "Open", "high": "High",
+        "low": "Low", "close": "Close", "volume": "Volume",
     })
-
     df["timestamp"] = pd.to_datetime(
         pd.to_numeric(df["timestamp"], errors="coerce"),
         unit="ms", utc=True
@@ -152,73 +117,48 @@ def _parse_candles(symbol: str, rows: list) -> pd.DataFrame:
     df = df.dropna(subset=["timestamp"])
     df = df.set_index("timestamp").sort_index()
     df = df[~df.index.duplicated(keep="last")]
-
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
+    for col in ["Open","High","Low","Close","Volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    df = df.dropna(subset=["Open","High","Low","Close"])
     df = df[df["Close"] > 0]
-
-    # Remove corrupt candles — bars where Close is < 0.5% of Open
-    # These are CoinDCX data glitches, not real prices
     bad = (df["Close"] < df["Open"] * 0.005) & (df["Open"] > 0)
     if bad.sum() > 0:
-        if VERBOSE:
-            print(f"  [{symbol}] removed {bad.sum()} corrupt candle(s)")
         df = df[~bad]
 
-    return df[["Open", "High", "Low", "Close", "Volume"]]
+    return df[["Open","High","Low","Close","Volume"]]
 
 
 # =============================================================================
-# Signal computation
+# HMA signal computation
 # =============================================================================
 
-def compute_signals(symbol: str, df: pd.DataFrame) -> dict | None:
+def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     """
-    Run utils.prepare_dataset() and return the latest bar's signal state.
-
-    Returns a dict:
-        entry_long  : bool   — True if all 3 entry conditions met on latest bar
-        exit_long   : bool   — True if HMA cross-down on latest bar
-        close       : float  — latest close price
-        hma_fast    : float  — latest HMA(16) value
-        hma_slow    : float  — latest HMA(64) value
-        hma_gap_pct : float  — (fast-slow)/slow * 100, negative = cross imminent
-        rsi         : float  — latest RSI(14)
-        linreg      : float  — latest LinReg(50) value
-        bars        : int    — number of prepared bars
-        bar_time    : str    — UTC timestamp of latest bar
-
-    Returns None if insufficient data or computation fails.
+    HMA(16/64) + RSI(14)>52 + LinReg(50) strategy.
+    Uses utils.prepare_dataset() — the YouTuber's validated indicator code.
     """
-    if len(df) < _MIN_BARS:
-        if VERBOSE:
-            print(f"  [{symbol}] only {len(df)} bars, need {_MIN_BARS} — skip")
+    if len(df) < _MIN_BARS_HMA:
         return None
 
     try:
         prepared = utils.prepare_dataset(
             df,
-            hma_fast         = HMA_FAST,
-            hma_slow         = HMA_SLOW,
-            rsi_period       = RSI_PERIOD,
-            rsi_threshold    = RSI_THRESHOLD,
-            linreg_length    = LINREG_LENGTH,
-            hma_half_mode    = HMA_HALF_MODE,
-            hma_sqrt_mode    = HMA_SQRT_MODE,
-            use_sma          = USE_SMA,
-            use_daily_linreg = USE_DAILY_LINREG,
+            hma_fast=HMA_FAST, hma_slow=HMA_SLOW,
+            rsi_period=RSI_PERIOD, rsi_threshold=RSI_THRESHOLD,
+            linreg_length=LINREG_LENGTH,
+            hma_half_mode=HMA_HALF_MODE, hma_sqrt_mode=HMA_SQRT_MODE,
+            use_sma=USE_SMA, use_daily_linreg=USE_DAILY_LINREG,
         )
     except Exception as e:
-        print(f"  [{symbol}] indicator error: {e}")
+        if VERBOSE:
+            print(f"  [{symbol}][HMA] error: {e}")
         return None
 
-    if prepared.empty:
+    if prepared.empty or len(prepared) < 2:
         return None
 
-    row = prepared.iloc[-1]
+    row     = prepared.iloc[-1]
     hma_gap = (
         (float(row["hma_fast"]) - float(row["hma_slow"])) /
         float(row["hma_slow"]) * 100
@@ -226,21 +166,107 @@ def compute_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     )
 
     return {
-        "entry_long":  bool(row["entry_long"] == 1),
-        "exit_long":   bool(row["exit_long"]  == 1),
-        "close":       float(row["Close"]),
-        "hma_fast":    float(row["hma_fast"]),
-        "hma_slow":    float(row["hma_slow"]),
-        "hma_gap_pct": hma_gap,
-        "rsi":         float(row["rsi"]),
-        "linreg":      float(row["linreg_4h"]),
-        "bars":        len(prepared),
-        "bar_time":    str(row.name),
-        # Individual conditions — useful for logging
-        "c_cross":     bool(row["cross_up"]),
-        "c_rsi":       float(row["rsi"]) > RSI_THRESHOLD,
-        "c_linreg":    float(row["Close"]) > float(row["linreg_4h"]),
+        "strategy":     "hma",
+        "entry_signal": bool(row["entry_long"] == 1),
+        "exit_signal":  bool(row["exit_long"]  == 1),
+        "close":        float(row["Close"]),
+        "hma_fast":     float(row["hma_fast"]),
+        "hma_slow":     float(row["hma_slow"]),
+        "hma_gap_pct":  round(hma_gap, 2),
+        "rsi":          float(row["rsi"]),
+        "linreg":       float(row["linreg_4h"]),
+        "bars":         len(prepared),
+        "bar_time":     str(row.name),
     }
+
+
+# =============================================================================
+# Ichimoku signal computation
+# =============================================================================
+
+def compute_ichimoku_signals(symbol: str, df: pd.DataFrame) -> dict | None:
+    """
+    YouTuber Abhishek's 3-condition Ichimoku entry:
+
+    LONG entry — all 3 required:
+        1. Tenkan crosses ABOVE Kijun (TK bullish crossover)
+        2. Close > close from 26 bars ago (Chikou above past price)
+        3. Close > cloud top (price outside and above cloud)
+
+    EXIT — either:
+        - Tenkan crosses BELOW Kijun
+        - Close < Kijun (Kijun acts as dynamic stop loss)
+
+    Settings: 9/26/52 (original Japanese)
+    """
+    if len(df) < _MIN_BARS_ICHI:
+        return None
+
+    try:
+        d = df.copy()
+        d["tenkan"] = (
+            d["High"].rolling(ICHI_TENKAN).max() +
+            d["Low"].rolling(ICHI_TENKAN).min()
+        ) / 2
+        d["kijun"] = (
+            d["High"].rolling(ICHI_KIJUN).max() +
+            d["Low"].rolling(ICHI_KIJUN).min()
+        ) / 2
+        span_a_raw = (d["tenkan"] + d["kijun"]) / 2
+        span_b_raw = (
+            d["High"].rolling(ICHI_SENKOU).max() +
+            d["Low"].rolling(ICHI_SENKOU).min()
+        ) / 2
+        d["span_a"]       = span_a_raw.shift(ICHI_KIJUN)
+        d["span_b"]       = span_b_raw.shift(ICHI_KIJUN)
+        d["cloud_top"]    = d[["span_a","span_b"]].max(axis=1)
+        d["cloud_bottom"] = d[["span_a","span_b"]].min(axis=1)
+        d["chikou_ref"]   = d["Close"].shift(ICHI_KIJUN)
+        d = d.dropna()
+
+        if len(d) < 2:
+            return None
+
+        latest = d.iloc[-1]
+        prev   = d.iloc[-2]
+
+        tk_bull = (float(latest["tenkan"]) > float(latest["kijun"]) and
+                   float(prev["tenkan"])   <= float(prev["kijun"]))
+        tk_bear = (float(latest["tenkan"]) < float(latest["kijun"]) and
+                   float(prev["tenkan"])   >= float(prev["kijun"]))
+
+        chikou_bull = float(latest["Close"]) > float(latest["chikou_ref"])
+        above_cloud = float(latest["Close"]) > float(latest["cloud_top"])
+        below_kijun = float(latest["Close"]) < float(latest["kijun"])
+
+        cloud_gap = (
+            (float(latest["Close"]) - float(latest["cloud_top"])) /
+            float(latest["cloud_top"]) * 100
+            if float(latest["cloud_top"]) != 0 else 0.0
+        )
+
+        return {
+            "strategy":     "ichimoku",
+            "entry_signal": tk_bull and chikou_bull and above_cloud,
+            "exit_signal":  tk_bear or below_kijun,
+            "close":        float(latest["Close"]),
+            "tenkan":       float(latest["tenkan"]),
+            "kijun":        float(latest["kijun"]),
+            "cloud_top":    float(latest["cloud_top"]),
+            "cloud_bottom": float(latest["cloud_bottom"]),
+            "cloud_gap_pct":round(cloud_gap, 2),
+            "tk_bull":      tk_bull,
+            "tk_bear":      tk_bear,
+            "chikou_ok":    chikou_bull,
+            "above_cloud":  above_cloud,
+            "bars":         len(d),
+            "bar_time":     str(latest.name),
+        }
+
+    except Exception as e:
+        if VERBOSE:
+            print(f"  [{symbol}][ICHI] error: {e}")
+        return None
 
 
 # =============================================================================
@@ -248,40 +274,45 @@ def compute_signals(symbol: str, df: pd.DataFrame) -> dict | None:
 # =============================================================================
 
 def _telegram(message: str) -> None:
-    """Send Telegram message. Silently skips if not configured."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message,
+                  "parse_mode": "HTML"},
             timeout=10,
         )
     except Exception:
         pass
 
 
-def notify_entry(symbol: str, price: float, qty: float,
-                 allocation: float, sig: dict) -> None:
+def notify_entry(symbol: str, strategy: str, price: float,
+                 qty: float, allocation: float, sig: dict) -> None:
+    if strategy == "ichimoku":
+        detail = (f"Cloud gap: {sig.get('cloud_gap_pct',0):+.2f}%\n"
+                  f"Kijun   : {sig.get('kijun',0):.4f} (stop)")
+    else:
+        detail = (f"RSI     : {sig.get('rsi',0):.1f}\n"
+                  f"HMA gap : {sig.get('hma_gap_pct',0):+.2f}%")
+
     _telegram(
-        f"<b>HMA Bot — ENTRY</b>\n"
+        f"<b>Bot — ENTRY [{strategy.upper()}]</b>\n"
         f"Coin       : {symbol}\n"
         f"Price      : ${price:.4f}\n"
         f"Qty        : {qty:.6f}\n"
         f"Allocation : ${allocation:.2f}\n"
-        f"RSI        : {sig['rsi']:.1f}\n"
-        f"HMA fast   : {sig['hma_fast']:.4f}\n"
-        f"HMA slow   : {sig['hma_slow']:.4f}\n"
-        f"LinReg     : {sig['linreg']:.4f}"
+        f"{detail}"
     )
 
 
-def notify_exit(symbol: str, entry_price: float, exit_price: float,
-                qty: float, pnl: float, reason: str) -> None:
+def notify_exit(symbol: str, strategy: str, entry_price: float,
+                exit_price: float, qty: float,
+                pnl: float, reason: str) -> None:
     pct  = (exit_price - entry_price) / entry_price * 100
     sign = "+" if pnl >= 0 else ""
     _telegram(
-        f"<b>HMA Bot — EXIT</b>\n"
+        f"<b>Bot — EXIT [{strategy.upper()}]</b>\n"
         f"Coin   : {symbol}\n"
         f"Reason : {reason}\n"
         f"Entry  : ${entry_price:.4f}\n"
@@ -294,7 +325,7 @@ def notify_exit(symbol: str, entry_price: float, exit_price: float,
 def notify_run_summary(equity: float, cash: float,
                         open_pos: int, realized_pnl: float) -> None:
     _telegram(
-        f"<b>HMA Bot — Run</b>\n"
+        f"<b>Bot — Run Summary</b>\n"
         f"Equity   : ${equity:.2f}\n"
         f"Cash     : ${cash:.2f}\n"
         f"Open     : {open_pos}\n"

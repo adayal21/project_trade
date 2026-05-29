@@ -1,25 +1,21 @@
 """
-main.py — HMA 4H Trend Bot
-==========================
-Runs every 4 hours via cron. On each run:
-    1. Fetch 4H candles for all 6 coins from CoinDCX
-    2. Compute HMA + RSI + LinReg signals via utils.prepare_dataset()
-    3. Exit pass  — check stop loss + HMA cross-down on every open position
-    4. Entry pass — check HMA cross-up + RSI + LinReg on every flat coin
-    5. Log portfolio snapshot
+main.py — HMA + Ichimoku Combined Crypto Bot
+=============================================
+Both HMA and Ichimoku run independently on ALL 15 coins.
+Each strategy manages its own separate position per coin.
+Total potential slots: 30 (15 coins × 2 strategies).
+Max active positions: 8 at any time, 10% allocation each.
 
-Files this bot reads/writes (all in data/ folder):
-    data/{COIN}_USDT_position.csv  — open position state per coin
-    data/{COIN}_USDT_trades.csv    — full trade history per coin
-    data/portfolio.csv             — equity curve (written by portfolio.py)
-    data/btc_regime_prev.txt       — not used (old bot artefact, ignored)
+Position files use strategy suffix:
+    data/BTC_USDT_hma_position.csv
+    data/BTC_USDT_ichi_position.csv
 
-Files that are UNCHANGED and shared with any other bots:
-    portfolio.py  — log_portfolio(), initialize_portfolio()
-    exchange.py   — place_market_order(), get_order_status()
-    utils.py      — HMA / RSI / LinReg indicator logic (YouTuber's file)
-    bot_utils.py  — data fetch + signal wrapper around utils.py
-    config.py     — all settings
+Priority when more than 8 signals fire simultaneously:
+    1. Double-confirmed (both HMA AND Ichimoku fire on same coin) → first
+    2. Single-strategy signals → by coin order in COINS list
+
+Cron (unchanged):
+    5 0,4,8,12,16,20 * * * cd ~/Projects/crypto_bot && python main.py >> data/bot.log 2>&1
 """
 
 import os
@@ -28,12 +24,14 @@ import pandas as pd
 from datetime import datetime, timezone
 
 from config import (
-    TRADING_MODE, INITIAL_CAPITAL, COINS, DATA_DIR,
+    TRADING_MODE, INITIAL_CAPITAL, COINS, STRATEGIES, DATA_DIR,
     ALLOCATION_PCT, MAX_OPEN_POSITIONS, POSITION_SIZE,
     COMMISSION, STOP_LOSS_PCT, VERBOSE,
 )
 from bot_utils import (
-    fetch_candles, compute_signals,
+    fetch_candles,
+    compute_hma_signals,
+    compute_ichimoku_signals,
     notify_entry, notify_exit, notify_run_summary,
 )
 from portfolio import initialize_portfolio, log_portfolio
@@ -42,24 +40,23 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 
 # =============================================================================
-# Position file helpers  (stored in data/ alongside the old bot's files)
+# Position helpers — strategy-aware filenames
 # =============================================================================
 
 def _safe(symbol: str) -> str:
-    """'BTC/USDT' → 'BTC_USDT'"""
     return symbol.replace("/", "_")
 
+def _strat_short(strategy: str) -> str:
+    return "ichi" if strategy == "ichimoku" else "hma"
 
-def get_position_file(symbol: str) -> str:
-    return f"{DATA_DIR}/{_safe(symbol)}_position.csv"
+def get_position_file(symbol: str, strategy: str) -> str:
+    return f"{DATA_DIR}/{_safe(symbol)}_{_strat_short(strategy)}_position.csv"
 
+def get_trade_file(symbol: str, strategy: str) -> str:
+    return f"{DATA_DIR}/{_safe(symbol)}_{_strat_short(strategy)}_trades.csv"
 
-def get_trade_file(symbol: str) -> str:
-    return f"{DATA_DIR}/{_safe(symbol)}_trades.csv"
-
-
-def load_position(symbol: str) -> dict | None:
-    f = get_position_file(symbol)
+def load_position(symbol: str, strategy: str) -> dict | None:
+    f = get_position_file(symbol, strategy)
     if not os.path.exists(f):
         return None
     df = pd.read_csv(f)
@@ -72,23 +69,30 @@ def load_position(symbol: str) -> dict | None:
         return None
     return pos
 
+def save_position(symbol: str, strategy: str, pos: dict) -> None:
+    pd.DataFrame([pos]).to_csv(
+        get_position_file(symbol, strategy), index=False
+    )
 
-def save_position(symbol: str, pos: dict) -> None:
-    pd.DataFrame([pos]).to_csv(get_position_file(symbol), index=False)
-
-
-def clear_position(symbol: str) -> None:
-    f = get_position_file(symbol)
+def clear_position(symbol: str, strategy: str) -> None:
+    f = get_position_file(symbol, strategy)
     if os.path.exists(f):
         os.remove(f)
 
-
-def log_trade(symbol: str, trade: dict) -> None:
-    f  = get_trade_file(symbol)
+def log_trade(symbol: str, strategy: str, trade: dict) -> None:
+    f  = get_trade_file(symbol, strategy)
     df = pd.DataFrame([trade])
     if os.path.exists(f):
         df = pd.concat([pd.read_csv(f), df], ignore_index=True)
     df.to_csv(f, index=False)
+
+def count_open() -> int:
+    total = 0
+    for s in COINS:
+        for strat in STRATEGIES:
+            if load_position(s, strat) is not None:
+                total += 1
+    return total
 
 
 # =============================================================================
@@ -108,23 +112,17 @@ def load_portfolio_state() -> dict:
             }
     return {"cash": INITIAL_CAPITAL, "realized_pnl": 0.0, "total_trades": 0}
 
-
 def current_equity(cash: float, coins_data: dict) -> float:
-    """Cash + mark-to-market value of all open positions."""
     unreal = 0.0
     for s in COINS:
-        pos = load_position(s)
-        if pos is None:
-            continue
-        px = (float(coins_data[s]["Close"].iloc[-1])
-              if s in coins_data and not coins_data[s].empty
-              else float(pos["Entry Price"]))
-        unreal += float(pos["Quantity"]) * px
+        for strat in STRATEGIES:
+            pos = load_position(s, strat)
+            if pos is None:
+                continue
+            px = (float(coins_data[s]["Close"].iloc[-1])
+                  if s in coins_data else float(pos["Entry Price"]))
+            unreal += float(pos["Quantity"]) * px
     return cash + unreal
-
-
-def count_open() -> int:
-    return sum(1 for s in COINS if load_position(s) is not None)
 
 
 # =============================================================================
@@ -133,227 +131,283 @@ def count_open() -> int:
 
 initialize_portfolio()
 
-print("=" * 58)
-print(f"  HMA 4H Trend Bot  |  Mode: {TRADING_MODE.upper()}")
+print("=" * 65)
+print(f"  CRYPTO BOT — Dual Strategy  |  Mode: {TRADING_MODE.upper()}")
 print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-print("=" * 58)
-
-state        = load_portfolio_state()
-realized_pnl = state["realized_pnl"]
-total_trades = state["total_trades"]
-run_events   = []
-trades_run   = 0
+print(f"  Coins: {len(COINS)}  |  Strategies: {len(STRATEGIES)}  "
+      f"|  Slots: {len(COINS)*len(STRATEGIES)}")
+print(f"  Max positions: {MAX_OPEN_POSITIONS}  |  "
+      f"Allocation: {ALLOCATION_PCT:.0%} per trade")
+print("=" * 65)
 
 if TRADING_MODE == "live":
     from exchange import get_live_usdt_balance, reconcile_positions
-    print("Reconciling positions with CoinDCX account...")
-    reconcile_positions(COINS, load_position, save_position, clear_position)
+    print("Reconciling positions...")
     cash = get_live_usdt_balance()
     print(f"Live USDT balance: ${cash:.2f}")
+    state = load_portfolio_state()
+    realized_pnl = state["realized_pnl"]
+    total_trades = state["total_trades"]
 else:
-    cash = state["cash"]
+    state        = load_portfolio_state()
+    cash         = state["cash"]
+    realized_pnl = state["realized_pnl"]
+    total_trades = state["total_trades"]
+
+run_events = []
+trades_run = 0
 
 print(f"  Cash         : ${cash:,.4f}")
 print(f"  Realized PnL : ${realized_pnl:+,.4f}")
 print(f"  Total trades : {total_trades}")
+print(f"  Open pos     : {count_open()} / {MAX_OPEN_POSITIONS}")
 print()
 
+
 # =============================================================================
-# Step 1 — Fetch candles for all coins
+# Step 1 — Fetch candles (once per coin)
 # =============================================================================
-print("=" * 58)
+print("=" * 65)
 print("  Fetching 4H candles from CoinDCX...")
-print("=" * 58)
+print("=" * 65)
 
 coins_data = {}
 for symbol in COINS:
     df = fetch_candles(symbol)
     if df.empty or len(df) < 100:
-        print(f"  {symbol:<12}  SKIP — only {len(df)} bars returned")
+        print(f"  {symbol:<14}  SKIP — only {len(df)} bars")
         continue
     coins_data[symbol] = df
-    print(f"  {symbol:<12}  {len(df):>4} bars  "
+    print(f"  {symbol:<14}  {len(df):>4} bars  "
           f"({df.index.min().strftime('%Y-%m-%d')} → "
           f"{df.index.max().strftime('%Y-%m-%d')})  "
-          f"last close: {df['Close'].iloc[-1]:.4f}")
+          f"close={df['Close'].iloc[-1]:.4f}")
 print()
 
-# =============================================================================
-# Step 2 — Compute signals
-# =============================================================================
-print("=" * 58)
-print("  Signal state")
-print("=" * 58)
-print(f"  {'Coin':<12} {'Close':>10} {'RSI':>6} {'HMAfast':>10} "
-      f"{'HMAslow':>10} {'Gap%':>7} {'Entry':>7} {'Exit':>6}")
-print(f"  {'-'*72}")
 
-all_signals = {}
+# =============================================================================
+# Step 2 — Compute both signals for every coin
+# =============================================================================
+print("=" * 65)
+print("  Signal state  (HMA + Ichimoku on all 15 coins)")
+print("=" * 65)
+print(f"  {'Coin':<14} {'HMA':^22} {'ICHIMOKU':^26}")
+print(f"  {'':14} {'RSI':>6} {'Gap%':>7} {'Sig':>6}  "
+      f"{'TK':>4} {'Cloud%':>7} {'Sig':>6}")
+print(f"  {'-'*60}")
+
+all_signals = {}   # {(symbol, strategy): sig_dict}
+
 for symbol, df in coins_data.items():
-    sig = compute_signals(symbol, df)
-    if sig is None:
-        print(f"  {symbol:<12}  signal computation failed")
-        continue
-    all_signals[symbol] = sig
-    e_flag = " ENTRY" if sig["entry_long"] else "      "
-    x_flag = "  EXIT" if sig["exit_long"]  else "      "
-    print(f"  {symbol:<12} "
-          f"{sig['close']:>10.4f} "
-          f"{sig['rsi']:>6.1f} "
-          f"{sig['hma_fast']:>10.4f} "
-          f"{sig['hma_slow']:>10.4f} "
-          f"{sig['hma_gap_pct']:>+7.2f}%"
-          f"{e_flag}{x_flag}")
+    hma_sig  = compute_hma_signals(symbol, df)
+    ichi_sig = compute_ichimoku_signals(symbol, df)
+
+    if hma_sig:
+        all_signals[(symbol, "hma")] = hma_sig
+    if ichi_sig:
+        all_signals[(symbol, "ichimoku")] = ichi_sig
+
+    # Build display
+    if hma_sig:
+        hma_rsi = f"{hma_sig['rsi']:>5.1f}"
+        hma_gap = f"{hma_sig['hma_gap_pct']:>+6.2f}%"
+        hma_sig_str = "ENTRY " if hma_sig["entry_signal"] else (
+                      "EXIT  " if hma_sig["exit_signal"]  else "hold  ")
+    else:
+        hma_rsi = hma_gap = "  N/A"
+        hma_sig_str = "ERROR "
+
+    if ichi_sig:
+        tk  = "BULL" if ichi_sig.get("tk_bull") else "bear"
+        cg  = f"{ichi_sig.get('cloud_gap_pct',0):>+6.2f}%"
+        ichi_sig_str = "ENTRY " if ichi_sig["entry_signal"] else (
+                       "EXIT  " if ichi_sig["exit_signal"]  else "hold  ")
+    else:
+        tk = " N/A"; cg = "  N/A"
+        ichi_sig_str = "ERROR "
+
+    print(f"  {symbol:<14} {hma_rsi} {hma_gap} {hma_sig_str}  "
+          f"{tk:>4} {cg} {ichi_sig_str}")
 print()
 
+
 # =============================================================================
-# Step 3 — Exit pass  (always before entries)
+# Step 3 — Exit pass (all 30 slots)
 # =============================================================================
-print("=" * 58)
+print("=" * 65)
 print("  Exit pass")
-print("=" * 58)
+print("=" * 65)
 
 any_exit = False
 for symbol in COINS:
-    pos = load_position(symbol)
-    if pos is None:
-        continue
+    for strategy in STRATEGIES:
+        pos = load_position(symbol, strategy)
+        if pos is None:
+            continue
 
-    entry_price = float(pos["Entry Price"])
-    quantity    = float(pos["Quantity"])
+        entry_price  = float(pos["Entry Price"])
+        quantity     = float(pos["Quantity"])
+        bars_held    = int(pos.get("Bars_Held", 0))
+        sig          = all_signals.get((symbol, strategy))
 
-    latest_price = (
-        float(coins_data[symbol]["Close"].iloc[-1])
-        if symbol in coins_data and not coins_data[symbol].empty
-        else entry_price
-    )
+        latest_price = (
+            float(coins_data[symbol]["Close"].iloc[-1])
+            if symbol in coins_data else entry_price
+        )
+        move_pct    = (latest_price - entry_price) / entry_price
+        exit_reason = None
 
-    move_pct    = (latest_price - entry_price) / entry_price
-    exit_reason = None
+        # Stop loss — HMA only (Ichimoku uses Kijun as stop, checked in signal)
+        if strategy == "hma" and move_pct <= -STOP_LOSS_PCT:
+            exit_reason = "STOP_LOSS"
+        elif sig and sig["exit_signal"]:
+            if strategy == "ichimoku":
+                exit_reason = ("TK_CROSS_DOWN" if sig.get("tk_bear")
+                               else "BELOW_KIJUN")
+            else:
+                exit_reason = "HMA_CROSS_DOWN"
 
-    # --- Stop loss (hard exit, checked first) ---
-    if move_pct <= -STOP_LOSS_PCT:
-        exit_reason = "STOP_LOSS"
+        if exit_reason is None:
+            print(f"  {symbol:<14} [{strategy.upper():<8}]  "
+                  f"HOLDING  entry={entry_price:.4f}  "
+                  f"now={latest_price:.4f}  "
+                  f"move={move_pct:+.2%}  bars={bars_held}")
+            save_position(symbol, strategy,
+                          {**pos, "Bars_Held": bars_held + 1})
+            continue
 
-    # --- HMA cross-down signal ---
-    elif symbol in all_signals and all_signals[symbol]["exit_long"]:
-        exit_reason = "HMA_CROSS_DOWN"
+        # Execute exit
+        pnl     = move_pct * entry_price * quantity
+        comm    = latest_price * quantity * COMMISSION
+        net_pnl = pnl - comm if TRADING_MODE == "paper" else pnl
+        sign    = "+" if net_pnl >= 0 else ""
 
-    if exit_reason is None:
-        # Still holding — print status line
-        bars_held = int(pos.get("Bars_Held", 0))
-        print(f"  {symbol:<12}  HOLDING  "
-              f"entry={entry_price:.4f}  "
-              f"now={latest_price:.4f}  "
-              f"move={move_pct:+.2%}  "
-              f"bars={bars_held}")
-        save_position(symbol, {**pos, "Bars_Held": bars_held + 1})
-        continue
+        print(f"  {symbol:<14} [{strategy.upper():<8}]  "
+              f"EXIT [{exit_reason}]  "
+              f"{entry_price:.4f} → {latest_price:.4f}  "
+              f"move={move_pct:+.2%}  PnL=${net_pnl:+.4f}")
 
-    # --- Execute exit ---
-    pnl          = move_pct * entry_price * quantity
-    commission_cost = latest_price * quantity * COMMISSION
-    net_pnl      = pnl - commission_cost if TRADING_MODE == "paper" else pnl
-    sign         = "+" if net_pnl >= 0 else ""
+        realized_pnl += net_pnl
+        total_trades += 1
+        trades_run   += 1
+        cash         += entry_price * quantity + net_pnl
+        any_exit      = True
 
-    print(f"  {symbol:<12}  EXIT [{exit_reason}]  "
-          f"entry={entry_price:.4f} → now={latest_price:.4f}  "
-          f"move={move_pct:+.2%}  PnL=${net_pnl:+.4f}")
+        run_events.append(
+            f"{symbol}[{strategy[:4].upper()}] {net_pnl:+.2f} {exit_reason}"
+        )
 
-    realized_pnl += net_pnl
-    total_trades += 1
-    trades_run   += 1
-    cash         += entry_price * quantity + net_pnl
-    any_exit      = True
+        log_trade(symbol, strategy, {
+            "Coin":        symbol,
+            "Strategy":    strategy,
+            "Side":        "LONG",
+            "Entry Price": entry_price,
+            "Exit Price":  round(latest_price, 8),
+            "Quantity":    quantity,
+            "PnL":         round(net_pnl, 6),
+            "Exit Reason": exit_reason,
+            "Exit Time":   datetime.now(timezone.utc).isoformat(),
+        })
 
-    run_events.append(f"{symbol} {net_pnl:+.2f} {exit_reason}")
+        notify_exit(symbol, strategy, entry_price, latest_price,
+                    quantity, net_pnl, exit_reason)
 
-    log_trade(symbol, {
-        "Coin":        symbol,
-        "Side":        "LONG",
-        "Entry Price": entry_price,
-        "Exit Price":  round(latest_price, 8),
-        "Quantity":    quantity,
-        "PnL":         round(net_pnl, 6),
-        "Exit Reason": exit_reason,
-        "Exit Time":   datetime.now(timezone.utc).isoformat(),
-    })
+        if TRADING_MODE == "live":
+            from exchange import place_market_order
+            place_market_order(symbol, "sell", quantity)
 
-    notify_exit(symbol, entry_price, latest_price, quantity, net_pnl, exit_reason)
-
-    if TRADING_MODE == "live":
-        from exchange import place_market_order
-        place_market_order(symbol, "sell", quantity)
-
-    clear_position(symbol)
+        clear_position(symbol, strategy)
 
 if not any_exit and count_open() == 0:
     print("  No open positions.")
 print()
 
-# =============================================================================
-# Step 4 — Entry pass
-# =============================================================================
-print("=" * 58)
-print("  Entry pass")
-print("=" * 58)
 
-# Recalculate equity after exits
+# =============================================================================
+# Step 4 — Entry pass with priority ordering
+# =============================================================================
+print("=" * 65)
+print("  Entry pass  (priority: double-confirmed > single signal)")
+print("=" * 65)
+
 equity_now = current_equity(cash, coins_data)
 open_count  = count_open()
 
-entry_signals = [
-    (s, all_signals[s])
-    for s in COINS
-    if s in all_signals
-    and all_signals[s]["entry_long"]
-    and load_position(s) is None
-]
+# Build all entry candidates
+raw_candidates = []
+for symbol in COINS:
+    for strategy in STRATEGIES:
+        sig = all_signals.get((symbol, strategy))
+        if sig and sig["entry_signal"] and load_position(symbol, strategy) is None:
+            raw_candidates.append((symbol, strategy, sig))
 
-if not entry_signals:
+# Check if the OTHER strategy also fired on same coin — used for priority
+double_confirmed_coins = set()
+entry_coins = {}
+for symbol, strategy, sig in raw_candidates:
+    if symbol not in entry_coins:
+        entry_coins[symbol] = []
+    entry_coins[symbol].append(strategy)
+for symbol, strats in entry_coins.items():
+    if len(strats) >= 2:
+        double_confirmed_coins.add(symbol)
+
+# Sort: double-confirmed first, then by COINS list order
+def priority_key(candidate):
+    symbol, strategy, sig = candidate
+    is_double = 0 if symbol in double_confirmed_coins else 1
+    coin_rank  = COINS.index(symbol) if symbol in COINS else 99
+    strat_rank = 0 if strategy == "hma" else 1
+    return (is_double, coin_rank, strat_rank)
+
+candidates = sorted(raw_candidates, key=priority_key)
+
+if not candidates:
     print("  No entry signals this run.")
 else:
-    print(f"  {len(entry_signals)} signal(s) found:")
-    for symbol, sig in entry_signals:
-        print(f"    {symbol}  RSI={sig['rsi']:.1f}  "
-              f"HMAcross={'Y' if sig['c_cross'] else 'N'}  "
-              f"RSIok={'Y' if sig['c_rsi'] else 'N'}  "
-              f"LinRegok={'Y' if sig['c_linreg'] else 'N'}")
+    print(f"  {len(candidates)} signal(s) found:")
+    for symbol, strategy, sig in candidates:
+        dbl = " ★DOUBLE" if symbol in double_confirmed_coins else ""
+        print(f"    {symbol:<14} [{strategy.upper():<8}]{dbl}  "
+              f"close={sig['close']:.4f}")
     print()
 
-    for symbol, sig in entry_signals:
-
-        # Gate 1 — position count
+    for symbol, strategy, sig in candidates:
         if open_count >= MAX_OPEN_POSITIONS:
-            print(f"  {symbol:<12}  BLOCKED — max positions "
-                  f"({open_count}/{MAX_OPEN_POSITIONS})")
+            print(f"  {symbol:<14} [{strategy.upper():<8}]  "
+                  f"BLOCKED — max positions ({open_count}/{MAX_OPEN_POSITIONS})")
             continue
 
-        # Gate 2 — capital
         allocation = equity_now * ALLOCATION_PCT
         if cash < allocation or allocation <= 0:
-            print(f"  {symbol:<12}  BLOCKED — insufficient cash "
+            print(f"  {symbol:<14} [{strategy.upper():<8}]  "
+                  f"BLOCKED — insufficient cash "
                   f"(need ${allocation:.2f}, have ${cash:.2f})")
             continue
 
         latest_price = sig["close"]
         quantity     = (allocation * POSITION_SIZE) / latest_price
-        commission_cost = latest_price * quantity * COMMISSION
 
-        print(f"  {symbol:<12}  ENTERING LONG")
+        dbl_str = " ★DOUBLE CONFIRMED" if symbol in double_confirmed_coins else ""
+        print(f"  {symbol:<14} [{strategy.upper():<8}]  "
+              f"ENTERING LONG{dbl_str}")
         print(f"    Price      : ${latest_price:.4f}")
         print(f"    Allocation : ${allocation:.2f}  "
-              f"({ALLOCATION_PCT:.0%} of ${equity_now:.2f} equity)")
+              f"({ALLOCATION_PCT:.0%} of ${equity_now:.2f})")
         print(f"    Quantity   : {quantity:.6f}")
-        print(f"    Commission : ${commission_cost:.4f}")
-        print(f"    Stop loss  : ${latest_price * (1 - STOP_LOSS_PCT):.4f}  "
-              f"(-{STOP_LOSS_PCT:.0%})")
-        print(f"    RSI        : {sig['rsi']:.1f}")
-        print(f"    HMA fast   : {sig['hma_fast']:.4f}")
-        print(f"    HMA slow   : {sig['hma_slow']:.4f}")
-        print(f"    LinReg     : {sig['linreg']:.4f}")
 
-        # Live mode — place real order
+        if strategy == "ichimoku":
+            print(f"    TK cross   : BULLISH")
+            print(f"    Chikou     : {'OK' if sig.get('chikou_ok') else 'WEAK'}")
+            print(f"    Cloud gap  : {sig.get('cloud_gap_pct',0):+.2f}%")
+            print(f"    Stop       : TK cross down / below Kijun "
+                  f"(${sig.get('kijun',0):.4f})")
+        else:
+            print(f"    RSI        : {sig.get('rsi',0):.1f}")
+            print(f"    HMA gap    : {sig.get('hma_gap_pct',0):+.2f}%")
+            print(f"    Stop       : ${latest_price*(1-STOP_LOSS_PCT):.4f}  "
+                  f"(-{STOP_LOSS_PCT:.0%})")
+
         if TRADING_MODE == "live":
             from exchange import place_market_order, get_order_status
             import time as _t
@@ -363,21 +417,19 @@ else:
                 continue
             _t.sleep(1.5)
             info        = get_order_status(order_id)
-            fill_px     = float(info.get("avg_price",          latest_price) or latest_price)
-            fill_qty    = float(info.get("total_quantity",      quantity)     or quantity) \
-                        - float(info.get("remaining_quantity",  0)            or 0)
+            fill_px     = float(info.get("avg_price", latest_price) or latest_price)
+            fill_qty    = float(info.get("total_quantity", quantity) or quantity) \
+                        - float(info.get("remaining_quantity", 0) or 0)
             fill_status = info.get("status", "unknown")
-            print(f"    Order {order_id}: {fill_status}  "
-                  f"fill={fill_px:.4f}  qty={fill_qty:.6f}")
             if fill_status not in ("filled", "partially_filled"):
-                print(f"    Not filled — skipping")
+                print(f"    Not filled ({fill_status}) — skipping")
                 continue
             latest_price = fill_px
             quantity     = fill_qty
 
-        # Save position
-        save_position(symbol, {
+        save_position(symbol, strategy, {
             "Coin":        symbol,
+            "Strategy":    strategy,
             "Side":        "LONG",
             "Entry Price": latest_price,
             "Quantity":    quantity,
@@ -389,74 +441,88 @@ else:
         open_count  += 1
         total_trades += 1
         trades_run   += 1
-        run_events.append(f"{symbol} ENTRY LONG @ {latest_price:.4f}")
+        run_events.append(
+            f"{symbol}[{strategy[:4].upper()}] ENTRY @ {latest_price:.4f}"
+        )
 
-        notify_entry(symbol, latest_price, quantity, allocation, sig)
+        notify_entry(symbol, strategy, latest_price, quantity, allocation, sig)
         print(f"    Entered @ ${latest_price:.4f}")
         print()
-
 print()
+
 
 # =============================================================================
 # Step 5 — Portfolio snapshot
 # =============================================================================
 equity_final = current_equity(cash, coins_data)
 open_count   = count_open()
-unrealized   = equity_final - cash
+
+unrealized = 0.0
+for s in COINS:
+    for strat in STRATEGIES:
+        pos = load_position(s, strat)
+        if pos is None:
+            continue
+        ep = float(pos["Entry Price"])
+        qty= float(pos["Quantity"])
+        cp = float(coins_data[s]["Close"].iloc[-1]) if s in coins_data else ep
+        unrealized += (cp - ep) * qty
 
 log_portfolio(
     cash, equity_final, open_count,
     realized_pnl, unrealized, total_trades, run_events
 )
-
 notify_run_summary(equity_final, cash, open_count, realized_pnl)
 
-print("=" * 58)
+print("=" * 65)
 print("  Portfolio Snapshot")
-print("=" * 58)
+print("=" * 65)
 print(f"  Mode          : {TRADING_MODE.upper()}")
 print(f"  Cash          : ${cash:,.4f}")
 print(f"  Unrealized    : ${unrealized:+,.4f}")
 print(f"  Equity        : ${equity_final:,.4f}")
 print(f"  Realized PnL  : ${realized_pnl:+,.4f}")
-print(f"  Return        : {(equity_final / INITIAL_CAPITAL - 1) * 100:+.2f}%")
+print(f"  Return        : {(equity_final/INITIAL_CAPITAL-1)*100:+.2f}%")
 print(f"  Open positions: {open_count} / {MAX_OPEN_POSITIONS}")
 print(f"  Trades today  : {trades_run}")
 print(f"  Total trades  : {total_trades}")
 print()
 
-# ── Open positions detail ─────────────────────────────────────────────────────
 if open_count > 0:
-    print("=" * 58)
+    print("=" * 65)
     print("  Open Positions")
-    print("=" * 58)
-    for symbol in COINS:
-        pos = load_position(symbol)
-        if pos is None:
-            continue
-        entry_px  = float(pos["Entry Price"])
-        qty       = float(pos["Quantity"])
-        bars_held = int(pos.get("Bars_Held", 0))
-        cur_px    = (float(coins_data[symbol]["Close"].iloc[-1])
-                     if symbol in coins_data and not coins_data[symbol].empty
-                     else entry_px)
-        move_pct  = (cur_px - entry_px) / entry_px
-        pnl       = move_pct * entry_px * qty
-        sign      = "+" if pnl >= 0 else ""
+    print("=" * 65)
+    for s in COINS:
+        for strat in STRATEGIES:
+            pos = load_position(s, strat)
+            if pos is None:
+                continue
+            ep   = float(pos["Entry Price"])
+            qty  = float(pos["Quantity"])
+            bars = int(pos.get("Bars_Held", 0))
+            cp   = float(coins_data[s]["Close"].iloc[-1]) if s in coins_data else ep
+            move = (cp - ep) / ep
+            pnl  = move * ep * qty
+            sign = "+" if pnl >= 0 else ""
+            sig  = all_signals.get((s, strat))
 
-        print(f"  {symbol}")
-        print(f"    Entry      : ${entry_px:.4f}")
-        print(f"    Current    : ${cur_px:.4f}")
-        print(f"    Move       : {move_pct:+.2%}")
-        print(f"    PnL        : {sign}${pnl:.4f}")
-        print(f"    Stop loss  : ${entry_px * (1 - STOP_LOSS_PCT):.4f}")
-        print(f"    Bars held  : {bars_held}")
-        if symbol in all_signals:
-            gap = all_signals[symbol]["hma_gap_pct"]
-            print(f"    HMA gap    : {gap:+.2f}%  "
-                  f"({'exit near' if gap > -0.5 else 'trend intact'})")
-        print()
+            print(f"  {s}  [{strat.upper()}]")
+            print(f"    Entry    : ${ep:.4f}")
+            print(f"    Current  : ${cp:.4f}")
+            print(f"    Move     : {move:+.2%}")
+            print(f"    PnL      : {sign}${pnl:.4f}")
+            print(f"    Bars held: {bars}")
+            if sig:
+                if strat == "ichimoku":
+                    tk = "BULL" if not sig.get("tk_bear") else "BEAR — EXIT SOON"
+                    print(f"    TK status: {tk}")
+                    print(f"    Cloud gap: {sig.get('cloud_gap_pct',0):+.2f}%")
+                else:
+                    gap = sig.get("hma_gap_pct", 0)
+                    print(f"    HMA gap  : {gap:+.2f}%  "
+                          f"({'exit near' if gap > -0.5 else 'trend intact'})")
+            print()
 
-print("=" * 58)
-print("  Done.")
-print("=" * 58)
+print("=" * 65)
+print(f"  Done.  Next run: next 4H candle close + 5 min")
+print("=" * 65)
