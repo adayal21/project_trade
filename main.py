@@ -35,6 +35,7 @@ from bot_utils import (
     notify_entry, notify_exit, notify_run_summary,
 )
 from portfolio import initialize_portfolio, log_portfolio
+from grid_bot import run_grid_bot
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -530,4 +531,15 @@ if open_count > 0:
 
 print("=" * 65)
 print(f"  Done.  Next run: next 4H candle close + 5 min")
+print("=" * 65)
+
+
+# =============================================================================
+# Grid Bot — runs after HMA/Ichimoku, completely independent
+# =============================================================================
+print()
+run_grid_bot(coins_data)
+
+print("=" * 65)
+print(f"  All done.  Next run: next 4H candle close + 5 min")
 print("=" * 65)
