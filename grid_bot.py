@@ -254,8 +254,9 @@ def update_coin(symbol, df):
         existing_drops = {round(p["drop_pct"], 1) for p in positions}
         drop_rounded   = round(drop_pct * 100, 1)
 
-        # Buy amount = drop% × current available cash (not fixed $1,000)
-        buy_amount = drop_pct * cash
+        # Buy amount = drop% × 10 × current available cash
+        # 1% drop → 10% of cash, 2% drop → 20% of cash, etc.
+        buy_amount = drop_pct * cash * 10
         buy_amount = min(buy_amount, COIN_CAPITAL - deployed, cash * 0.99)
 
         if buy_amount >= 1.0 and drop_rounded not in existing_drops:
