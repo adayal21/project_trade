@@ -32,8 +32,11 @@ from bot_utils import _telegram
 # Constants
 # =============================================================================
 COIN_CAPITAL    = 1_000.0   # hard capital per coin
-SELL_TARGET_PCT = 0.02      # flat 2% sell target
-MAX_DROP_GUARD  = 0.10      # skip if 1H candle dropped >10%
+# Dynamic sell targets based on time held
+SELL_TARGET_FAST = 0.02     # < 4 hours → 2%
+SELL_TARGET_MID  = 0.015    # 4-12 hours → 1.5%
+SELL_TARGET_SLOW = 0.01     # > 12 hours → 1%
+MAX_DROP_GUARD   = 0.10     # skip if candle dropped >10%
 MIN_DROP_TO_BUY = 0.01      # minimum 1% drop to trigger buy
 MAX_POSITIONS   = 20        # safety cap per coin
 
@@ -154,8 +157,27 @@ def update_coin(symbol, df):
         return 0.0, 0
 
     # ── Exit pass ─────────────────────────────────────────────────
+    now_ts = datetime.now(timezone.utc)
+
     remaining = []
     for pos in positions:
+        # Calculate dynamic target based on how long position has been open
+        try:
+            entry_dt  = pd.to_datetime(pos["entry_time"], utc=True)
+            hours_held = (now_ts - entry_dt).total_seconds() / 3600
+        except Exception:
+            hours_held = 0
+
+        if hours_held < 4:
+            dynamic_target = pos["entry_price"] * (1 + SELL_TARGET_FAST)
+        elif hours_held < 12:
+            dynamic_target = pos["entry_price"] * (1 + SELL_TARGET_MID)
+        else:
+            dynamic_target = pos["entry_price"] * (1 + SELL_TARGET_SLOW)
+
+        # Update target in position if it degraded
+        pos["target"] = dynamic_target
+
         if candle_high >= pos["target"]:
             sell_p   = pos["target"]
             proceeds = pos["qty"] * sell_p * (1 - COMMISSION)
@@ -217,7 +239,7 @@ def update_coin(symbol, df):
 
         if buy_amount >= 1.0 and drop_rounded not in existing_drops:
             qty    = buy_amount * (1 - COMMISSION) / price
-            target = price * (1 + SELL_TARGET_PCT)
+            target = price * (1 + SELL_TARGET_FAST)  # starts at 2%, degrades over time
 
             positions.append({
                 "qty":         qty,
@@ -253,7 +275,7 @@ def run_grid_bot(coins_data):
     print("=" * 65)
     print("  GRID BOT — % Martingale Strategy")
     print(f"  Coins: {len(GRID_COINS)}  |  Buy: drop%×$1k  |  "
-          f"Sell: +{SELL_TARGET_PCT:.0%}  |  Cap: ${COIN_CAPITAL:.0f}/coin")
+          f"Sell: 2%→1.5%→1% (dynamic)  |  Cap: ${COIN_CAPITAL:.0f}/coin")
     print("=" * 65)
 
     run_pnl = run_trades = total_open = 0
