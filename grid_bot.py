@@ -150,9 +150,29 @@ def update_coin(symbol, df):
     net_pnl      = 0.0
     trades_count = 0
 
-    # ── Set reference price on first run ─────────────────────────
+    # ── First run: buy 1% immediately as baseline position ───────
     if ref_price is None:
-        state["reference_price"] = price
+        ref_price  = price
+        buy_amount = 0.01 * cash   # 1% of available cash
+        buy_amount = min(buy_amount, COIN_CAPITAL - deployed, cash * 0.99)
+        if buy_amount >= 1.0:
+            qty    = buy_amount * (1 - COMMISSION) / price
+            target = price * (1 + SELL_TARGET_FAST)
+            positions.append({
+                "qty":         qty,
+                "entry_price": price,
+                "cost":        buy_amount,
+                "target":      target,
+                "drop_pct":    0.0,   # baseline entry, no drop
+                "entry_time":  ts,
+            })
+            deployed += buy_amount
+            cash     -= buy_amount
+            notify_buy(symbol, price, buy_amount, target, 0.0, deployed)
+
+        state.update({"reference_price": ref_price, "positions": positions,
+                      "deployed": deployed, "coin_cash": cash,
+                      "realized_pnl": realized})
         save_state(symbol, state)
         return 0.0, 0
 
@@ -205,8 +225,9 @@ def update_coin(symbol, df):
 
     positions = remaining
 
-    # Reset reference if all positions closed
-    if not positions:
+    # Reset reference only if we HAD positions and now they are all closed
+    # Do NOT reset just because positions is empty at start of run
+    if not positions and state.get("deployed", 0) > 0:
         ref_price = price
         deployed  = 0.0
 
