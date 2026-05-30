@@ -102,13 +102,16 @@ def load_grid_portfolio() -> dict:
 
 
 def log_grid_portfolio(equity: float, realized_pnl: float,
+                       unrealized_pnl: float,
                        total_trades: int, open_positions: int) -> None:
     f  = _grid_portfolio_file()
     row = pd.DataFrame([{
-        "Timestamp":    datetime.now(timezone.utc).isoformat(),
-        "Equity":       round(equity, 4),
-        "Realized PnL": round(realized_pnl, 4),
-        "Total Trades": total_trades,
+        "Timestamp":      datetime.now(timezone.utc).isoformat(),
+        "Cash":           round(equity - unrealized_pnl, 4),
+        "Equity":         round(equity, 4),
+        "Unrealized PnL": round(unrealized_pnl, 4),
+        "Realized PnL":   round(realized_pnl, 4),
+        "Total Trades":   total_trades,
         "Open Positions": open_positions,
     }])
     if os.path.exists(f):
@@ -381,26 +384,36 @@ def run_grid_bot(coins_data: dict) -> None:
               f"pnl_run={pnl:>+7.2f}  "
               f"trades={trades}{pause_str}")
 
-    # Total grid equity
-    total_equity = 0.0
+    # Total grid equity + unrealized PnL
+    total_equity    = 0.0
+    total_cash      = 0.0
+    total_unrealized= 0.0
+
     for symbol in GRID_COINS:
         state = load_grid_state(symbol)
         if symbol in coins_data:
             price = float(coins_data[symbol]["Close"].iloc[-1])
         else:
             price = 0.0
-        total_equity += state["coin_cash"] + sum(
-            pos["qty"] * price for pos in state["grid_orders"].values()
-        )
+        coin_cash     = state["coin_cash"]
+        coin_pos_value= sum(pos["qty"] * price for pos in state["grid_orders"].values())
+        coin_cost     = sum(pos["cost"]         for pos in state["grid_orders"].values())
+        coin_unrealized = coin_pos_value - coin_cost
+        total_cash       += coin_cash
+        total_unrealized += coin_unrealized
+        total_equity     += coin_cash + coin_pos_value
 
-    log_grid_portfolio(total_equity, realized_pnl, total_trades, total_open)
+    log_grid_portfolio(total_equity, realized_pnl, total_unrealized,
+                       total_trades, total_open)
 
     print()
     print("=" * 65)
     print("  Grid Portfolio Snapshot")
     print("=" * 65)
     print(f"  Mode          : {TRADING_MODE.upper()}")
-    print(f"  Total equity  : ${total_equity:,.4f}")
+    print(f"  Cash          : ${total_cash:,.4f}")
+    print(f"  Unrealized    : ${total_unrealized:+,.4f}")
+    print(f"  Equity        : ${total_equity:,.4f}")
     print(f"  Realized PnL  : ${realized_pnl:+,.4f}")
     print(f"  Return        : "
           f"{(total_equity / (GRID_INITIAL_CAPITAL * len(GRID_COINS) * GRID_ALLOCATION) - 1) * 100:+.2f}%")
