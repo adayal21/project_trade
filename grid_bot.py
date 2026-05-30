@@ -200,6 +200,7 @@ def update_coin(symbol, df):
         return net_pnl, trades_count
 
     # ── Entry pass ────────────────────────────────────────────────
+    # NOTE: cash is already updated from any sells above — use current cash as base
     drop_pct = (ref_price - price) / ref_price if ref_price > 0 else 0
 
     if (drop_pct >= MIN_DROP_TO_BUY and
@@ -210,8 +211,8 @@ def update_coin(symbol, df):
         existing_drops = {round(p["drop_pct"], 1) for p in positions}
         drop_rounded   = round(drop_pct * 100, 1)
 
-        # Buy amount = drop% × COIN_CAPITAL
-        buy_amount = drop_pct * COIN_CAPITAL
+        # Buy amount = drop% × current available cash (not fixed $1,000)
+        buy_amount = drop_pct * cash
         buy_amount = min(buy_amount, COIN_CAPITAL - deployed, cash * 0.99)
 
         if buy_amount >= 1.0 and drop_rounded not in existing_drops:
