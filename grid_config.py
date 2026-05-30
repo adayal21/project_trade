@@ -25,7 +25,7 @@ GRID_COINS = [
 # Grid parameters — DO NOT CHANGE (validated in backtest)
 # ---------------------------------------------------------------------------
 GRID_LEVELS        = 20       # grid levels per coin
-GRID_RANGE_BARS    = 200      # bars to look back for dynamic price range
+GRID_RANGE_BARS    = 168      # bars to look back — 168 x 1H = 7 days (1 week range)
 GRID_STOP_PCT      = 0.15     # 15% stop loss per grid position
 GRID_MAX_OPEN      = 10       # max open grid positions per coin
 GRID_ALLOCATION    = 0.10     # 10% of grid capital per coin
