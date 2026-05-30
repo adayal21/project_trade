@@ -21,17 +21,17 @@ from config import CANDLES_URL, CANDLES_LIMIT, WARMUP_BARS
 
 os.makedirs(GRID_DATA_DIR, exist_ok=True)
 
-INTERVAL      = "1h"
-INTERVAL_MS   = 3_600_000
-WARMUP_1H     = 300           # 300 bars of 1H = ~12 days, enough for grid range
+INTERVAL      = "30m"
+INTERVAL_MS   = 1_800_000
+WARMUP_BARS   = 336           # 336 bars of 30m = ~7 days
 
 
 def fetch_1h_candles(symbol: str) -> pd.DataFrame:
-    """Fetch 1H candles from CoinDCX for a single symbol."""
+    """Fetch 30m candles from CoinDCX for a single symbol."""
     base, quote = symbol.split("/")
     pair        = f"KC-{base}_{quote}"
     now_ms      = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms    = now_ms - (WARMUP_1H * INTERVAL_MS)
+    start_ms    = now_ms - (WARMUP_BARS * INTERVAL_MS)
     all_rows    = []
     cur         = start_ms
     retries     = 0
@@ -108,7 +108,7 @@ def fetch_1h_candles(symbol: str) -> pd.DataFrame:
 # =============================================================================
 
 print("=" * 65)
-print(f"  GRID BOT RUNNER  |  1H candles  |  CoinDCX")
+print(f"  GRID BOT RUNNER  |  30m candles  |  CoinDCX")
 print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 print("=" * 65)
 
@@ -120,8 +120,8 @@ for symbol in GRID_COINS:
         continue
     coins_data[symbol] = df
     print(f"  {symbol:<14}  {len(df):>4} bars  "
-          f"({df.index.min().strftime('%Y-%m-%d')} → "
-          f"{df.index.max().strftime('%Y-%m-%d')})  "
+          f"({df.index.min().strftime('%Y-%m-%d %H:%M')} → "
+          f"{df.index.max().strftime('%Y-%m-%d %H:%M')})  "
           f"close={df['Close'].iloc[-1]:.4f}")
 
 print()
