@@ -23,6 +23,7 @@ import utils   # YouTuber's HMA indicator library — do not modify
 from config import (
     CANDLES_URL, TIMEFRAME, CANDLES_LIMIT, INTERVAL_MS, WARMUP_BARS,
     HMA_FAST, HMA_SLOW, RSI_PERIOD, RSI_THRESHOLD, RSI_THRESHOLD_OVERRIDE,
+    HMA_GAP_FILTER,
     LINREG_LENGTH, HMA_HALF_MODE, HMA_SQRT_MODE,
     USE_SMA, USE_DAILY_LINREG,
     ICHI_TENKAN, ICHI_KIJUN, ICHI_SENKOU,
@@ -138,6 +139,7 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     HMA(16/64) + RSI(14) + LinReg(50) strategy.
     Uses utils.prepare_dataset() — the YouTuber's validated indicator code.
     RSI threshold is per-coin: BTC/ETH use 50, all others use 52.
+    Gap filter: DOGE/ETH/XRP/BNB allow mid-trend entry when gap ≤ 2%.
     """
     if len(df) < _MIN_BARS_HMA:
         return None
@@ -169,9 +171,26 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
         if float(row["hma_slow"]) != 0 else 0.0
     )
 
+    # Per-coin gap filter for mid-trend entry
+    # If coin has a gap filter, allow entry when gap is positive but ≤ max_gap%
+    # Otherwise use standard crossover signal only
+    gap_filter = HMA_GAP_FILTER.get(symbol)
+    if gap_filter is not None:
+        # Mid-trend entry: HMA fast > slow + gap ≤ filter + RSI ok (already in prepared)
+        hma_gap_frac = hma_gap / 100
+        mid_trend_entry = (
+            float(row["hma_fast"]) > float(row["hma_slow"]) and
+            0 < hma_gap_frac <= gap_filter and
+            bool(row["entry_long"] == 1 or  # also fire on crossover
+                 (float(row["rsi"]) > RSI_THRESHOLD_OVERRIDE.get(symbol, RSI_THRESHOLD)))
+        )
+        entry_signal = bool(row["entry_long"] == 1) or mid_trend_entry
+    else:
+        entry_signal = bool(row["entry_long"] == 1)
+
     return {
         "strategy":     "hma",
-        "entry_signal": bool(row["entry_long"] == 1),
+        "entry_signal": entry_signal,
         "exit_signal":  bool(row["exit_long"]  == 1),
         "close":        float(row["Close"]),
         "hma_fast":     float(row["hma_fast"]),

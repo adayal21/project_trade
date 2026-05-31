@@ -74,6 +74,18 @@ RSI_THRESHOLD_OVERRIDE = {
     "ETH/USDT": 50,
 }
 
+# Per-coin HMA gap filter for mid-trend entry — based on backtest analysis
+# None = crossover only (strict)
+# 0.02 = allow mid-trend entry when gap ≤ 2% (not too extended)
+# Coins that benefit from mid-trend entry: DOGE +140%, ETH +14%, XRP +27%, BNB +34%
+# Coins that perform better with strict crossover: BTC, ZEC, ADA, SOL, AVAX, LINK, JASMY, POL
+HMA_GAP_FILTER = {
+    "DOGE/USDT": 0.02,   # +366% → +506% with gap ≤2%
+    "ETH/USDT":  0.02,   # +49%  → +63%  with gap ≤2%
+    "XRP/USDT":  0.02,   # +147% → +174% with gap ≤2%
+    "BNB/USDT":  0.02,   # +23%  → +31%  with gap ≤2%
+}
+
 # ---------------------------------------------------------------------------
 # Ichimoku strategy parameters — DO NOT CHANGE
 # ---------------------------------------------------------------------------
