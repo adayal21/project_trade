@@ -12,13 +12,17 @@
 # Grid coin universe — CoinDCX format
 # ---------------------------------------------------------------------------
 GRID_COINS = [
-    "ZEC/USDT",    # +33.3% | Sharpe 0.77 | Best performer
-    "XRP/USDT",    # +27.2% | Sharpe 0.52
-    "LINK/USDT",   # +26.4% | Sharpe 0.49
-    "JASMY/USDT",  # +24.8% | Sharpe 0.54
-    "SOL/USDT",    # +24.7% | Sharpe 0.54
-    "ETH/USDT",    # +13.5% | Sharpe 0.35
-    "BTC/USDT",    # +9.0%  | Sharpe 0.27 | Most stable
+    # High volatility, low BTC/ETH correlation — optimised for noise capture
+    # All verified with 15m candle data on CoinDCX
+    "DOGE/USDT",   # meme volatility, high noise frequency
+    "SHIB/USDT",   # extreme meme volatility (paper trading verified)
+    "JASMY/USDT",  # very volatile, low BTC correlation
+    "ALGO/USDT",   # independent price action, volatile
+    "VET/USDT",    # supply chain narrative, volatile
+    "NEAR/USDT",   # ecosystem volatility, independent moves
+    "ZEC/USDT",    # proven in backtest, volatile
+    "XRP/USDT",    # regulatory-driven volatility
+    "LINK/USDT",   # DeFi narrative, decent noise
 ]
 
 # ---------------------------------------------------------------------------

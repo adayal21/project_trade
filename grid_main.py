@@ -21,9 +21,9 @@ from config import CANDLES_URL, CANDLES_LIMIT, WARMUP_BARS
 
 os.makedirs(GRID_DATA_DIR, exist_ok=True)
 
-INTERVAL      = "30m"
-INTERVAL_MS   = 1_800_000
-WARMUP_BARS   = 336           # 336 bars of 30m = ~7 days
+INTERVAL      = "15m"
+INTERVAL_MS   = 900_000
+WARMUP_BARS   = 500           # 500 bars of 15m = ~5 days
 
 
 def fetch_1h_candles(symbol: str) -> pd.DataFrame:
@@ -108,7 +108,7 @@ def fetch_1h_candles(symbol: str) -> pd.DataFrame:
 # =============================================================================
 
 print("=" * 65)
-print(f"  GRID BOT RUNNER  |  30m candles  |  CoinDCX")
+print(f"  GRID BOT RUNNER  |  15m candles  |  CoinDCX")
 print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 print("=" * 65)
 
