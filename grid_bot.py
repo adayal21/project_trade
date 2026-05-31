@@ -23,8 +23,33 @@ import json
 import pandas as pd
 from datetime import datetime, timezone
 from config import TRADING_MODE, COMMISSION
-from grid_config import GRID_COINS, GRID_DATA_DIR
+from grid_config import GRID_COINS, GRID_DATA_DIR, COIN_PRECISION, COIN_MIN_QTY, COIN_PRECISION, COIN_MIN_QTY
 from bot_utils import _telegram
+
+# =============================================================================
+# Helpers
+# =============================================================================
+def _round_qty(symbol: str, qty: float) -> float:
+    """Round quantity to coin precision and check minimum."""
+    precision = COIN_PRECISION.get(symbol, 4)
+    min_qty   = COIN_MIN_QTY.get(symbol, 0.0)
+    rounded   = round(qty, precision)
+    return rounded if rounded >= min_qty else 0.0
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _round_qty(symbol: str, qty: float) -> float:
+    """Round quantity to CoinDCX required precision."""
+    precision = COIN_PRECISION.get(symbol, 6)
+    return round(qty, precision)
+
+def _check_min_qty(symbol: str, qty: float) -> bool:
+    """Check if quantity meets CoinDCX minimum."""
+    min_qty = COIN_MIN_QTY.get(symbol, 0.0)
+    return qty >= min_qty
+
 
 # =============================================================================
 # Constants
@@ -153,14 +178,17 @@ def update_coin(symbol, df):
         ref_price    = price
         buy_amount   = min(FIRST_RUN_PCT * cash, COIN_CAPITAL * 0.99)
         if buy_amount >= 1.0:
-            qty    = buy_amount * (1 - COMMISSION) / price
-            target = price * (1 + SELL_TARGET)
-            positions.append({
-                "qty":         qty,
-                "entry_price": price,
-                "cost":        buy_amount,
-                "target":      target,
-                "level":       "init",
+            qty    = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
+            if qty == 0.0:
+                buy_amount = 0.0
+            else:
+                target = price * (1 + SELL_TARGET)
+                positions.append({
+                    "qty":         qty,
+                    "entry_price": price,
+                    "cost":        buy_amount,
+                    "target":      target,
+                    "level":       "init",
                 "entry_time":  ts,
             })
             deployed += buy_amount
@@ -231,7 +259,9 @@ def update_coin(symbol, df):
                 buy_amount = alloc_pct * cash
                 buy_amount = min(buy_amount, COIN_CAPITAL - deployed, cash * 0.99)
                 if buy_amount >= 1.0:
-                    qty    = buy_amount * (1 - COMMISSION) / price
+                    qty    = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
+                    if qty == 0.0:
+                        continue
                     target = price * (1 + SELL_TARGET)
                     positions.append({
                         "qty":         qty,
@@ -251,7 +281,7 @@ def update_coin(symbol, df):
             remaining_cap = COIN_CAPITAL - deployed
             buy_amount    = min(remaining_cap, cash * 0.99)
             if buy_amount >= 1.0:
-                qty    = buy_amount * (1 - COMMISSION) / price
+                qty    = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
                 target = price * (1 + SELL_TARGET)
                 positions.append({
                     "qty":         qty,

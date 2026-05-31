@@ -43,3 +43,62 @@ GRID_INITIAL_CAPITAL = 10_000.0   # paper: virtual $10k for grid bot
 # Data directory — uses same data dir but distinct filenames
 # ---------------------------------------------------------------------------
 GRID_DATA_DIR = "data/grid"       # all grid files go here
+
+# ---------------------------------------------------------------------------
+# Coin precision — decimal places for quantity rounding (CoinDCX requirement)
+# Prevents order rejection in live mode
+# ---------------------------------------------------------------------------
+COIN_PRECISION = {
+    "DOGE/USDT":  5,
+    "SHIB/USDT":  9,
+    "JASMY/USDT": 6,
+    "ALGO/USDT":  4,
+    "VET/USDT":   6,
+    "NEAR/USDT":  4,
+    "ZEC/USDT":   3,
+    "XRP/USDT":   5,
+    "LINK/USDT":  4,
+}
+
+# Minimum order quantities per coin (from CoinDCX markets_details API)
+COIN_MIN_QTY = {
+    "DOGE/USDT":  10.0,
+    "SHIB/USDT":  100_000.0,
+    "JASMY/USDT": 1.0,
+    "ALGO/USDT":  1.0,
+    "VET/USDT":   100.0,
+    "NEAR/USDT":  0.1,
+    "ZEC/USDT":   0.001,
+    "XRP/USDT":   0.1,
+    "LINK/USDT":  0.01,
+}
+
+# ---------------------------------------------------------------------------
+# Coin precision — decimal places for quantity rounding (CoinDCX requirement)
+# ---------------------------------------------------------------------------
+COIN_PRECISION = {
+    "DOGE/USDT":  5,
+    "SHIB/USDT":  9,
+    "JASMY/USDT": 6,
+    "ALGO/USDT":  4,
+    "VET/USDT":   6,
+    "NEAR/USDT":  4,
+    "ZEC/USDT":   3,
+    "XRP/USDT":   5,
+    "LINK/USDT":  4,
+}
+
+# ---------------------------------------------------------------------------
+# Minimum order quantity per coin (CoinDCX requirement)
+# ---------------------------------------------------------------------------
+COIN_MIN_QTY = {
+    "DOGE/USDT":  10.0,
+    "SHIB/USDT":  100_000.0,
+    "JASMY/USDT": 1.0,
+    "ALGO/USDT":  1.0,
+    "VET/USDT":   100.0,
+    "NEAR/USDT":  0.1,
+    "ZEC/USDT":   0.001,
+    "XRP/USDT":   0.1,
+    "LINK/USDT":  0.01,
+}
