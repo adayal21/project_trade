@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from config import (
     TRADING_MODE, INITIAL_CAPITAL, COINS, STRATEGIES, DATA_DIR,
     ALLOCATION_PCT, MAX_OPEN_POSITIONS, POSITION_SIZE,
-    COMMISSION, STOP_LOSS_PCT, VERBOSE,
+    COMMISSION, STOP_LOSS_PCT, VERBOSE, HMA_EXIT_FREQUENCY,
 )
 from bot_utils import (
     fetch_candles,
@@ -171,8 +171,15 @@ print()
 # =============================================================================
 # Step 1 — Fetch candles (once per coin)
 # =============================================================================
+# Detect if this run is at a 4H candle close
+# Cron runs every hour; entries only fire at 4H closes (0,4,8,12,16,20 UTC)
+from datetime import datetime, timezone as _tz
+_now_hour     = datetime.now(_tz.utc).hour
+_is_4h_close  = (_now_hour % 4 == 0)
+
 print("=" * 65)
-print("  Fetching 4H candles from CoinDCX...")
+print(f"  Fetching 4H candles from CoinDCX...  "
+      f"[{'4H CLOSE — entries active' if _is_4h_close else 'hourly check — exits only'}]")
 print("=" * 65)
 
 coins_data = {}
@@ -182,7 +189,10 @@ for symbol in COINS:
         print(f"  {symbol:<14}  SKIP — only {len(df)} bars")
         continue
     coins_data[symbol] = df
-
+    print(f"  {symbol:<14}  {len(df):>4} bars  "
+          f"({df.index.min().strftime('%Y-%m-%d')} → "
+          f"{df.index.max().strftime('%Y-%m-%d')})  "
+          f"close={df['Close'].iloc[-1]:.4f}")
 print()
 
 
@@ -258,10 +268,16 @@ for symbol in COINS:
         move_pct    = (latest_price - entry_price) / entry_price
         exit_reason = None
 
-        # Stop loss — HMA only (Ichimoku uses Kijun as stop, checked in signal)
+        # Per-coin exit frequency check
+        # 1H-exit coins: always check exit signal
+        # 4H-exit coins: only check exit on 4H candle close runs
+        exit_freq = HMA_EXIT_FREQUENCY.get(symbol, "4h")
+        skip_exit = (exit_freq == "4h" and not _is_4h_close)
+
+        # Stop loss — always checked regardless of frequency
         if strategy == "hma" and move_pct <= -STOP_LOSS_PCT:
             exit_reason = "STOP_LOSS"
-        elif sig and sig["exit_signal"]:
+        elif not skip_exit and sig and sig["exit_signal"]:
             if strategy == "ichimoku":
                 exit_reason = ("TK_CROSS_DOWN" if sig.get("tk_bear")
                                else "BELOW_KIJUN")
@@ -325,7 +341,7 @@ print()
 
 
 # =============================================================================
-# Step 4 — Entry pass with priority ordering
+# Step 4 — Entry pass (only on 4H candle closes)
 # =============================================================================
 print("=" * 65)
 print("  Entry pass  (priority: double-confirmed > single signal)")
@@ -334,13 +350,18 @@ print("=" * 65)
 equity_now = current_equity(cash, coins_data)
 open_count  = count_open()
 
-# Build all entry candidates
-raw_candidates = []
-for symbol in COINS:
-    for strategy in STRATEGIES:
-        sig = all_signals.get((symbol, strategy))
-        if sig and sig["entry_signal"] and load_position(symbol, strategy) is None:
-            raw_candidates.append((symbol, strategy, sig))
+# Entries only fire at 4H candle closes — not on hourly exit checks
+if not _is_4h_close:
+    print("  Hourly run — entries skipped (next 4H close for entries)")
+    raw_candidates = []
+else:
+    # Build all entry candidates
+    raw_candidates = []
+    for symbol in COINS:
+        for strategy in STRATEGIES:
+            sig = all_signals.get((symbol, strategy))
+            if sig and sig["entry_signal"] and load_position(symbol, strategy) is None:
+                raw_candidates.append((symbol, strategy, sig))
 
 # Check if the OTHER strategy also fired on same coin — used for priority
 double_confirmed_coins = set()

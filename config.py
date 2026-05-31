@@ -74,6 +74,26 @@ RSI_THRESHOLD_OVERRIDE = {
     "ETH/USDT": 50,
 }
 
+# Per-coin exit frequency — based on backtest analysis
+# "1h" = check exit every hour (catches fast reversals)
+# "4h" = check exit only on 4H candle close (better for slow steady trends)
+# BTC/ETH/DOGE/XRP/SOL perform better with 4H exit (slow trends)
+# ADA/BNB/AVAX/LINK/ZEC/JASMY/POL perform better with 1H exit
+HMA_EXIT_FREQUENCY = {
+    "BTC/USDT":   "4h",   # 4H better: +138.6% vs +92.7%
+    "ETH/USDT":   "4h",   # 4H better: +49.3% vs -10.2%
+    "DOGE/USDT":  "4h",   # 4H better: +361.7% vs -16.6%
+    "XRP/USDT":   "4h",   # 4H better: +145.3% vs +23.5%
+    "SOL/USDT":   "4h",   # 4H better: +66.9% vs +35.1%
+    "ADA/USDT":   "1h",   # 1H better: +157.0% vs +29.2%
+    "BNB/USDT":   "1h",   # 1H better: +30.6% vs +21.9%
+    "AVAX/USDT":  "1h",   # 1H better: +292.0% vs -1.2%
+    "LINK/USDT":  "1h",   # 1H better: +155.0% vs -43.0%
+    "ZEC/USDT":   "1h",   # 1H better: +689.4% vs +607.5%
+    "JASMY/USDT": "1h",   # 1H better: +415.3% vs -35.9%
+    "POL/USDT":   "1h",   # 1H better: -4.4% vs -12.7%
+}
+
 # Per-coin HMA gap filter for mid-trend entry — based on backtest analysis
 # None = crossover only (strict)
 # 0.02 = allow mid-trend entry when gap ≤ 2% (not too extended)
@@ -86,18 +106,32 @@ HMA_GAP_FILTER = {
     "BNB/USDT":  0.02,   # +23%  → +31%  with gap ≤2%
 }
 
+# Per-coin Ichimoku Chikou condition override — based on backtest analysis
+# True  = require chikou (current strict behavior)
+# False = skip chikou check (enter on TK cross + cloud only)
+# Removing chikou improves avg return from +22% to +48.4% on most coins
+# ETH and BNB perform better WITH chikou — keep strict for those
+ICHI_REQUIRE_CHIKOU = {
+    "BTC/USDT":   False,  # NoCloud best but NoChikou also +8.8% better
+    "ETH/USDT":   True,   # Full is best — keep chikou
+    "DOGE/USDT":  False,  # NoCloud +106.6% better
+    "ADA/USDT":   False,  # NoChikou +18.4% better
+    "SOL/USDT":   False,  # NoChikou +133% better
+    "BNB/USDT":   True,   # Full is best — keep chikou
+    "XRP/USDT":   False,  # NoChikou +44.8% better
+    "AVAX/USDT":  False,  # NoChikou +31.2% better
+    "LINK/USDT":  False,  # NoCloud +49.6% better
+    "ZEC/USDT":   False,  # NoChikou +167.9% better
+    "JASMY/USDT": False,  # NoCloud +89.1% better
+    "POL/USDT":   False,  # NoChikou +28.1% better
+}
+
 # ---------------------------------------------------------------------------
 # Ichimoku strategy parameters — DO NOT CHANGE
 # ---------------------------------------------------------------------------
-ICHI_TENKAN  = 9    # Conversion line period
-ICHI_KIJUN   = 26   # Base line period
-ICHI_SENKOU  = 52   # Senkou Span B period
-
-# Coins that still require Chikou confirmation
-ICHI_REQUIRE_CHIKOU = {
-    "ETH/USDT": True,
-    "BNB/USDT": True,
-}
+ICHI_TENKAN  = 9
+ICHI_KIJUN   = 26
+ICHI_SENKOU  = 52
 
 # ---------------------------------------------------------------------------
 # Position sizing
@@ -114,7 +148,7 @@ COMMISSION = 0.002   # 0.2% per side — CoinDCX actual taker fee
 # ---------------------------------------------------------------------------
 # Stop loss (HMA coins only — Ichimoku uses Kijun as dynamic stop)
 # ---------------------------------------------------------------------------
-STOP_LOSS_PCT = 0.15   # 15% hard stop for HMA coins
+STOP_LOSS_PCT = 0.15
 
 # ---------------------------------------------------------------------------
 # Data fetching
