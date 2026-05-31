@@ -119,10 +119,7 @@ for symbol in GRID_COINS:
         print(f"  {symbol:<14}  SKIP — only {len(df)} bars")
         continue
     coins_data[symbol] = df
-    print(f"  {symbol:<14}  {len(df):>4} bars  "
-          f"({df.index.min().strftime('%Y-%m-%d %H:%M')} → "
-          f"{df.index.max().strftime('%Y-%m-%d %H:%M')})  "
-          f"close={df['Close'].iloc[-1]:.4f}")
+
 
 print()
 run_grid_bot(coins_data)

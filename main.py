@@ -182,10 +182,7 @@ for symbol in COINS:
         print(f"  {symbol:<14}  SKIP — only {len(df)} bars")
         continue
     coins_data[symbol] = df
-    print(f"  {symbol:<14}  {len(df):>4} bars  "
-          f"({df.index.min().strftime('%Y-%m-%d')} → "
-          f"{df.index.max().strftime('%Y-%m-%d')})  "
-          f"close={df['Close'].iloc[-1]:.4f}")
+
 print()
 
 
@@ -527,11 +524,6 @@ if open_count > 0:
                     print(f"    HMA gap  : {gap:+.2f}%  "
                           f"({'exit near' if gap > -0.5 else 'trend intact'})")
             print()
-
-print("=" * 65)
-print(f"  Done.  Next run: next 4H candle close + 5 min")
-print("=" * 65)
-
 
 print("=" * 65)
 print(f"  Done.  Next run: next 4H candle close + 5 min")
