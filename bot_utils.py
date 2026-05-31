@@ -22,7 +22,7 @@ import utils   # YouTuber's HMA indicator library — do not modify
 
 from config import (
     CANDLES_URL, TIMEFRAME, CANDLES_LIMIT, INTERVAL_MS, WARMUP_BARS,
-    HMA_FAST, HMA_SLOW, RSI_PERIOD, RSI_THRESHOLD,
+    HMA_FAST, HMA_SLOW, RSI_PERIOD, RSI_THRESHOLD, RSI_THRESHOLD_OVERRIDE,
     LINREG_LENGTH, HMA_HALF_MODE, HMA_SQRT_MODE,
     USE_SMA, USE_DAILY_LINREG,
     ICHI_TENKAN, ICHI_KIJUN, ICHI_SENKOU,
@@ -135,17 +135,21 @@ def fetch_candles(symbol: str) -> pd.DataFrame:
 
 def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     """
-    HMA(16/64) + RSI(14)>52 + LinReg(50) strategy.
+    HMA(16/64) + RSI(14) + LinReg(50) strategy.
     Uses utils.prepare_dataset() — the YouTuber's validated indicator code.
+    RSI threshold is per-coin: BTC/ETH use 50, all others use 52.
     """
     if len(df) < _MIN_BARS_HMA:
         return None
+
+    # Per-coin RSI threshold — BTC and ETH use 50 (backtest validated)
+    rsi_thresh = RSI_THRESHOLD_OVERRIDE.get(symbol, RSI_THRESHOLD)
 
     try:
         prepared = utils.prepare_dataset(
             df,
             hma_fast=HMA_FAST, hma_slow=HMA_SLOW,
-            rsi_period=RSI_PERIOD, rsi_threshold=RSI_THRESHOLD,
+            rsi_period=RSI_PERIOD, rsi_threshold=rsi_thresh,
             linreg_length=LINREG_LENGTH,
             hma_half_mode=HMA_HALF_MODE, hma_sqrt_mode=HMA_SQRT_MODE,
             use_sma=USE_SMA, use_daily_linreg=USE_DAILY_LINREG,

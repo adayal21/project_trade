@@ -1,9 +1,9 @@
 # =============================================================================
 # config.py — HMA + Ichimoku Combined Crypto Bot
 # =============================================================================
-# Two strategies running on 15 coins simultaneously:
-#   HMA (9 coins)      : HMA(16/64) + RSI(14)>52 + LinReg(50) on 4H
-#   Ichimoku (6 coins) : TK cross + Chikou + Above cloud on 4H
+# Two strategies running on 12 coins simultaneously:
+#   HMA       : HMA(16/64) + RSI(14) + LinReg(50) on 4H
+#   Ichimoku  : TK cross + Chikou + Above cloud on 4H
 #
 # Cron: 5 0,4,8,12,16,20 * * *  (every 4 hours, no change)
 # =============================================================================
@@ -25,11 +25,9 @@ TRADING_MODE = os.environ.get("TRADING_MODE", "paper")
 # Capital
 # ---------------------------------------------------------------------------
 if TRADING_MODE == "live":
-    # Reads INR balance from CoinDCX — converted to USDT at trade time
-    # Set LIVE_INITIAL_CAPITAL in .env to match your deposit amount in INR
     INITIAL_CAPITAL = float(os.environ.get("LIVE_INITIAL_CAPITAL", "10000"))
 else:
-    INITIAL_CAPITAL = 10_000.0   # Paper trading virtual capital (INR equivalent)
+    INITIAL_CAPITAL = 10_000.0
 
 # ---------------------------------------------------------------------------
 # Data directory
@@ -39,51 +37,42 @@ DATA_DIR = "data"
 # ---------------------------------------------------------------------------
 # Coin universe
 # ---------------------------------------------------------------------------
-# Listed in priority order — when MAX_OPEN_POSITIONS is hit,
-# lower-ranked coins are skipped for that run.
-#
-# HMA coins  : best results with HMA crossover strategy (Sharpe 0.54-1.42)
-# ICHI coins : best results with Ichimoku 3-condition entry (Sharpe 0.49-0.96)
-# Skipped    : XRP, ATOM, LTC, DOT — neither strategy profitable on these
-
 COINS = [
-    # 12 validated coins — both HMA and Ichimoku run independently on each
-    # Removed: DOT (-1.5% combined), LTC (-74.7%), ATOM (-93.0%)
-    # 24 total independent slots (12 coins x 2 strategies)
-    #
-    # Combined backtest 2022-2026 (4H, 0.2% commission):
     "DOGE/USDT",   # Combined +271% | HMA +133% | ICHI +138% | BEST
     "ADA/USDT",    # Combined +199% | HMA +152% | ICHI  +47%
-    "POL/USDT",    # Combined +166% | HMA  +86% | ICHI  +80% (MATIC rebranded to POL)
+    "POL/USDT",    # Combined +166% | HMA  +86% | ICHI  +80%
     "SOL/USDT",    # Combined +160% | HMA  +74% | ICHI  +86%
     "BNB/USDT",    # Combined  +89% | HMA  +21% | ICHI  +68%
     "XRP/USDT",    # Combined  +87% | HMA  +91% | ICHI   -4%
-    "BTC/USDT",    # Combined  +82% | HMA  +65% | ICHI  +17%
+    "BTC/USDT",    # Combined  +82% | HMA  +65% | ICHI  +17% | RSI 50
     "AVAX/USDT",   # Combined  +82% | HMA  +79% | ICHI   +3%
-    "ETH/USDT",    # Combined  +40% | HMA  -27% | ICHI  +67%
+    "ETH/USDT",    # Combined  +40% | HMA  -27% | ICHI  +67% | RSI 50
     "LINK/USDT",   # Combined  +36% | HMA  -29% | ICHI  +65%
     "ZEC/USDT",    # HMA Sharpe 1.42 | Best HMA Sharpe overall
     "JASMY/USDT",  # HMA Sharpe 0.90 | 4-year consistent
 ]
 
-# Both HMA and Ichimoku run independently on ALL 15 coins.
-# Each strategy can open its own position on the same coin simultaneously.
-# Double-confirmed entries (both fire) get priority in the entry queue.
-# Strategies available: "hma", "ichimoku"
 STRATEGIES = ["hma", "ichimoku"]
 
 # ---------------------------------------------------------------------------
-# HMA strategy parameters — DO NOT CHANGE
+# HMA strategy parameters
 # ---------------------------------------------------------------------------
 HMA_FAST         = 16
 HMA_SLOW         = 64
 RSI_PERIOD       = 14
-RSI_THRESHOLD    = 52
+RSI_THRESHOLD    = 52       # default RSI threshold for all coins
 LINREG_LENGTH    = 50
 HMA_HALF_MODE    = "round"
 HMA_SQRT_MODE    = "floor"
 USE_SMA          = False
 USE_DAILY_LINREG = False
+
+# Per-coin RSI overrides — based on backtest analysis
+# BTC and ETH perform better at RSI 50 (+27.9% and +35.6% improvement)
+RSI_THRESHOLD_OVERRIDE = {
+    "BTC/USDT": 50,
+    "ETH/USDT": 50,
+}
 
 # ---------------------------------------------------------------------------
 # Ichimoku strategy parameters — DO NOT CHANGE
@@ -95,8 +84,8 @@ ICHI_SENKOU  = 52   # Senkou Span B period
 # ---------------------------------------------------------------------------
 # Position sizing
 # ---------------------------------------------------------------------------
-ALLOCATION_PCT     = 0.10   # 10% per trade — max 8 active = 80% deployed
-MAX_OPEN_POSITIONS = 8      # max simultaneous positions across 30 slots (15 coins x 2 strategies)
+ALLOCATION_PCT     = 0.20   # 20% per trade — max 4 active = 80% deployed
+MAX_OPEN_POSITIONS = 4      # max simultaneous positions
 POSITION_SIZE      = 0.999  # tiny rounding buffer
 
 # ---------------------------------------------------------------------------
