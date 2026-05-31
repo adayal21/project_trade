@@ -26,7 +26,7 @@ from config import (
     HMA_GAP_FILTER,
     LINREG_LENGTH, HMA_HALF_MODE, HMA_SQRT_MODE,
     USE_SMA, USE_DAILY_LINREG,
-    ICHI_TENKAN, ICHI_KIJUN, ICHI_SENKOU,
+    ICHI_TENKAN, ICHI_KIJUN, ICHI_SENKOU, ICHI_REQUIRE_CHIKOU,
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, VERBOSE,
 )
 
@@ -262,6 +262,13 @@ def compute_ichimoku_signals(symbol: str, df: pd.DataFrame) -> dict | None:
         above_cloud = float(latest["Close"]) > float(latest["cloud_top"])
         below_kijun = float(latest["Close"]) < float(latest["kijun"])
 
+        require_chikou = ICHI_REQUIRE_CHIKOU.get(symbol, False)
+
+        if require_chikou:
+            entry_signal = tk_bull and chikou_bull and above_cloud
+        else:
+            entry_signal = tk_bull and above_cloud
+
         cloud_gap = (
             (float(latest["Close"]) - float(latest["cloud_top"])) /
             float(latest["cloud_top"]) * 100
@@ -270,7 +277,7 @@ def compute_ichimoku_signals(symbol: str, df: pd.DataFrame) -> dict | None:
 
         return {
             "strategy":     "ichimoku",
-            "entry_signal": tk_bull and chikou_bull and above_cloud,
+            "entry_signal": entry_signal,
             "exit_signal":  tk_bear or below_kijun,
             "close":        float(latest["Close"]),
             "tenkan":       float(latest["tenkan"]),

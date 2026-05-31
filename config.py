@@ -93,6 +93,12 @@ ICHI_TENKAN  = 9    # Conversion line period
 ICHI_KIJUN   = 26   # Base line period
 ICHI_SENKOU  = 52   # Senkou Span B period
 
+# Coins that still require Chikou confirmation
+ICHI_REQUIRE_CHIKOU = {
+    "ETH/USDT": True,
+    "BNB/USDT": True,
+}
+
 # ---------------------------------------------------------------------------
 # Position sizing
 # ---------------------------------------------------------------------------
