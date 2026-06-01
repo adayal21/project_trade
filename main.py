@@ -32,6 +32,7 @@ from bot_utils import (
     fetch_candles,
     fetch_candles_1h,
     compute_hma_signals,
+    compute_hma_exit_1h,
     compute_ichimoku_signals,
     notify_entry, notify_exit, notify_run_summary,
 )
@@ -279,10 +280,10 @@ for symbol in COINS:
         exit_freq = HMA_EXIT_FREQUENCY.get(symbol, "4h")
         skip_exit = (exit_freq == "4h" and not _is_4h_close)
 
-        # For 1H exit coins — recompute HMA signal on 1H candles
-        # min_bars=100 since we only need exit signal, not full warmup
+        # For 1H exit coins — use lightweight 1H exit function
+        # Does not use YouTuber's library, avoids linreg_4h column issue
         if exit_freq == "1h" and strategy == "hma" and symbol in coins_data_1h:
-            sig_1h = compute_hma_signals(symbol, coins_data_1h[symbol], min_bars=100)
+            sig_1h = compute_hma_exit_1h(symbol, coins_data_1h[symbol])
         else:
             sig_1h = None
 

@@ -142,9 +142,62 @@ def fetch_candles(symbol: str) -> pd.DataFrame:
 
 def fetch_candles_1h(symbol: str) -> pd.DataFrame:
     """Fetch 500 bars of 1H candles from CoinDCX — used for 1H exit detection.
-    500 bars = ~21 days — enough for HMA(64) + LinReg(50) warmup.
+    500 bars = ~21 days — enough for HMA(64) warmup.
     """
     return _fetch_ohlcv(symbol, "1h", 3_600_000, 500)
+
+
+def compute_hma_exit_1h(symbol: str, df: pd.DataFrame) -> dict | None:
+    """
+    Lightweight HMA exit signal for 1H candles.
+    Does NOT use YouTuber's library — computes HMA directly.
+    Only checks exit condition: HMA fast crosses below HMA slow.
+    Used for 1H exit detection on BNB, ADA, AVAX, LINK, ZEC, JASMY, POL.
+    """
+    if len(df) < HMA_SLOW + 10:
+        return None
+
+    try:
+        close = df["Close"].astype(float)
+
+        def _wma(s, p):
+            return s.ewm(span=p, adjust=False).mean()
+
+        def _hma(s, p):
+            half  = max(int(p / 2), 1)
+            sqrtp = max(int(np.sqrt(p)), 1)
+            return _wma(2 * _wma(s, half) - _wma(s, p), sqrtp)
+
+        hma_fast = _hma(close, HMA_FAST)
+        hma_slow = _hma(close, HMA_SLOW)
+
+        latest_fast = float(hma_fast.iloc[-1])
+        latest_slow = float(hma_slow.iloc[-1])
+        prev_fast   = float(hma_fast.iloc[-2])
+        prev_slow   = float(hma_slow.iloc[-2])
+
+        # Exit: HMA fast crosses below HMA slow
+        cross_down  = (latest_fast < latest_slow) and (prev_fast >= prev_slow)
+        # Also exit if fast has been below slow for the last bar (sustained cross)
+        below       = latest_fast < latest_slow
+
+        hma_gap = (latest_fast - latest_slow) / latest_slow * 100 if latest_slow != 0 else 0.0
+
+        return {
+            "strategy":     "hma",
+            "entry_signal": False,   # never enter from 1H function
+            "exit_signal":  cross_down or below,
+            "close":        float(df["Close"].iloc[-1]),
+            "hma_fast":     latest_fast,
+            "hma_slow":     latest_slow,
+            "hma_gap_pct":  round(hma_gap, 2),
+            "bar_time":     str(df.index[-1]),
+        }
+
+    except Exception as e:
+        if VERBOSE:
+            print(f"  [{symbol}][HMA-1H] error: {e}")
+        return None
 
 
 # =============================================================================
