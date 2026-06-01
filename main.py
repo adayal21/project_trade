@@ -280,8 +280,9 @@ for symbol in COINS:
         skip_exit = (exit_freq == "4h" and not _is_4h_close)
 
         # For 1H exit coins — recompute HMA signal on 1H candles
+        # min_bars=100 since we only need exit signal, not full warmup
         if exit_freq == "1h" and strategy == "hma" and symbol in coins_data_1h:
-            sig_1h = compute_hma_signals(symbol, coins_data_1h[symbol])
+            sig_1h = compute_hma_signals(symbol, coins_data_1h[symbol], min_bars=100)
         else:
             sig_1h = None
 

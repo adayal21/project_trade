@@ -141,23 +141,27 @@ def fetch_candles(symbol: str) -> pd.DataFrame:
 
 
 def fetch_candles_1h(symbol: str) -> pd.DataFrame:
-    """Fetch 300 bars of 1H candles from CoinDCX — used for 1H exit detection."""
-    return _fetch_ohlcv(symbol, "1h", 3_600_000, 300)
+    """Fetch 500 bars of 1H candles from CoinDCX — used for 1H exit detection.
+    500 bars = ~21 days — enough for HMA(64) + LinReg(50) warmup.
+    """
+    return _fetch_ohlcv(symbol, "1h", 3_600_000, 500)
 
 
 # =============================================================================
 # HMA signal computation
 # =============================================================================
 
-def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
+def compute_hma_signals(symbol: str, df: pd.DataFrame,
+                        min_bars: int = _MIN_BARS_HMA) -> dict | None:
     """
     HMA(16/64) + RSI(14) + LinReg(50) strategy.
     Uses utils.prepare_dataset() — the YouTuber's validated indicator code.
     RSI threshold is per-coin: BTC/ETH use 50, all others use 52.
     Gap filter: DOGE/ETH/XRP/BNB allow mid-trend entry when gap ≤ 2%.
     Works on both 4H candles (entry) and 1H candles (exit detection).
+    min_bars: lower for 1H exit use (100 bars sufficient for exit signal).
     """
-    if len(df) < _MIN_BARS_HMA:
+    if len(df) < min_bars:
         return None
 
     # Per-coin RSI threshold — BTC and ETH use 50 (backtest validated)
