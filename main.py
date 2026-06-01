@@ -1,20 +1,12 @@
 """
 main.py — HMA + Ichimoku Combined Crypto Bot
 =============================================
-Both HMA and Ichimoku run independently on ALL 12 coins.
-Each strategy manages its own separate position per coin.
-Total potential slots: 24 (12 coins × 2 strategies).
-Max active positions: 4 at any time, 20% allocation each.
+Entry  : 4H candle close only (0,4,8,12,16,20 UTC)
+Exit   : 1H candles, checked every hourly cron run — ALL coins
+         Uses compute_hma_exit_1h() (EWM-based HMA, no linreg dependency)
+         which avoids the None return from utils.prepare_dataset on short 1H history.
 
-Position files use strategy suffix:
-    data/BTC_USDT_hma_position.csv
-    data/BTC_USDT_ichi_position.csv
-
-Priority when more than 4 signals fire simultaneously:
-    1. Double-confirmed (both HMA AND Ichimoku fire on same coin) → first
-    2. Single-strategy signals → by coin order in COINS list
-
-Cron (hourly — exits checked every hour, entries only at 4H closes):
+Cron:
     5 * * * * cd ~/Projects/project_trade && echo "========================================" >> logs/live.log && TZ=Asia/Kolkata date >> logs/live.log && /home/g12amandayal12/Projects/venv/bin/python main.py >> logs/live.log 2>&1
 """
 
@@ -26,7 +18,7 @@ from datetime import datetime, timezone
 from config import (
     TRADING_MODE, INITIAL_CAPITAL, COINS, STRATEGIES, DATA_DIR,
     ALLOCATION_PCT, MAX_OPEN_POSITIONS, POSITION_SIZE,
-    COMMISSION, STOP_LOSS_PCT, VERBOSE, HMA_EXIT_FREQUENCY,
+    COMMISSION, STOP_LOSS_PCT, VERBOSE,
 )
 from bot_utils import (
     fetch_candles,
@@ -40,68 +32,55 @@ from portfolio import initialize_portfolio, log_portfolio
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
+_now_utc     = datetime.now(timezone.utc)
+_now_hour    = _now_utc.hour
+_is_4h_close = (_now_hour % 4 == 0)
+
 
 # =============================================================================
-# Position helpers — strategy-aware filenames
+# Position helpers
 # =============================================================================
 
-def _safe(symbol: str) -> str:
-    return symbol.replace("/", "_")
+def _safe(symbol):   return symbol.replace("/", "_")
+def _short(strat):   return "ichi" if strat == "ichimoku" else "hma"
 
-def _strat_short(strategy: str) -> str:
-    return "ichi" if strategy == "ichimoku" else "hma"
+def get_position_file(symbol, strategy):
+    return f"{DATA_DIR}/{_safe(symbol)}_{_short(strategy)}_position.csv"
 
-def get_position_file(symbol: str, strategy: str) -> str:
-    return f"{DATA_DIR}/{_safe(symbol)}_{_strat_short(strategy)}_position.csv"
+def get_trade_file(symbol, strategy):
+    return f"{DATA_DIR}/{_safe(symbol)}_{_short(strategy)}_trades.csv"
 
-def get_trade_file(symbol: str, strategy: str) -> str:
-    return f"{DATA_DIR}/{_safe(symbol)}_{_strat_short(strategy)}_trades.csv"
-
-def load_position(symbol: str, strategy: str) -> dict | None:
+def load_position(symbol, strategy):
     f = get_position_file(symbol, strategy)
     if not os.path.exists(f):
         return None
     df = pd.read_csv(f)
     if df.empty:
-        os.remove(f)
-        return None
+        os.remove(f); return None
     pos = df.iloc[0].to_dict()
     if float(pos.get("Quantity", 0)) <= 0:
-        os.remove(f)
-        return None
+        os.remove(f); return None
     return pos
 
-def save_position(symbol: str, strategy: str, pos: dict) -> None:
-    pd.DataFrame([pos]).to_csv(
-        get_position_file(symbol, strategy), index=False
-    )
+def save_position(symbol, strategy, pos):
+    pd.DataFrame([pos]).to_csv(get_position_file(symbol, strategy), index=False)
 
-def clear_position(symbol: str, strategy: str) -> None:
+def clear_position(symbol, strategy):
     f = get_position_file(symbol, strategy)
-    if os.path.exists(f):
-        os.remove(f)
+    if os.path.exists(f): os.remove(f)
 
-def log_trade(symbol: str, strategy: str, trade: dict) -> None:
+def log_trade(symbol, strategy, trade):
     f  = get_trade_file(symbol, strategy)
     df = pd.DataFrame([trade])
     if os.path.exists(f):
         df = pd.concat([pd.read_csv(f), df], ignore_index=True)
     df.to_csv(f, index=False)
 
-def count_open() -> int:
-    total = 0
-    for s in COINS:
-        for strat in STRATEGIES:
-            if load_position(s, strat) is not None:
-                total += 1
-    return total
+def count_open():
+    return sum(1 for s in COINS for st in STRATEGIES
+               if load_position(s, st) is not None)
 
-
-# =============================================================================
-# Portfolio helpers
-# =============================================================================
-
-def load_portfolio_state() -> dict:
+def load_portfolio_state():
     pf = f"{DATA_DIR}/portfolio.csv"
     if os.path.exists(pf):
         df = pd.read_csv(pf)
@@ -114,21 +93,17 @@ def load_portfolio_state() -> dict:
             }
     return {"cash": INITIAL_CAPITAL, "realized_pnl": 0.0, "total_trades": 0}
 
-def current_equity(cash: float, coins_data: dict) -> float:
-    """Cash + mark-to-market gain/loss on all open positions."""
-    position_value = 0.0
+def current_equity(cash, coins_data):
+    val = 0.0
     for s in COINS:
-        for strat in STRATEGIES:
-            pos = load_position(s, strat)
-            if pos is None:
-                continue
-            ep = float(pos["Entry Price"])
-            qty= float(pos["Quantity"])
-            cp = (float(coins_data[s]["Close"].iloc[-1])
-                  if s in coins_data else ep)
-            # Current market value of position (not gain — full value)
-            position_value += qty * cp
-    return cash + position_value
+        for st in STRATEGIES:
+            pos = load_position(s, st)
+            if pos is None: continue
+            ep  = float(pos["Entry Price"])
+            qty = float(pos["Quantity"])
+            cp  = float(coins_data[s]["Close"].iloc[-1]) if s in coins_data else ep
+            val += qty * cp
+    return cash + val
 
 
 # =============================================================================
@@ -137,25 +112,19 @@ def current_equity(cash: float, coins_data: dict) -> float:
 
 initialize_portfolio()
 
-print("=" * 65)
-print(f"  CRYPTO BOT — Dual Strategy  |  Mode: {TRADING_MODE.upper()}")
-print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-print(f"  Coins: {len(COINS)}  |  Strategies: {len(STRATEGIES)}  "
-      f"|  Slots: {len(COINS)*len(STRATEGIES)}")
-print(f"  Max positions: {MAX_OPEN_POSITIONS}  |  "
-      f"Allocation: {ALLOCATION_PCT:.0%} per trade")
-print("=" * 65)
+print("=" * 55)
+print(f"  CRYPTO BOT | {TRADING_MODE.upper()} | {_now_utc.strftime('%Y-%m-%d %H:%M UTC')}")
+print(f"  {'4H CLOSE — entries + exits' if _is_4h_close else 'Hourly — exits only'}")
+print("=" * 55)
 
+state        = load_portfolio_state() if TRADING_MODE != "live" else None
 if TRADING_MODE == "live":
-    from exchange import get_live_usdt_balance, reconcile_positions
-    print("Reconciling positions...")
-    cash = get_live_usdt_balance()
-    print(f"Live USDT balance: ${cash:.2f}")
-    state = load_portfolio_state()
+    from exchange import get_live_usdt_balance
+    cash         = get_live_usdt_balance()
+    state        = load_portfolio_state()
     realized_pnl = state["realized_pnl"]
     total_trades = state["total_trades"]
 else:
-    state        = load_portfolio_state()
     cash         = state["cash"]
     realized_pnl = state["realized_pnl"]
     total_trades = state["total_trades"]
@@ -163,99 +132,75 @@ else:
 run_events = []
 trades_run = 0
 
-print(f"  Cash         : ${cash:,.4f}")
-print(f"  Realized PnL : ${realized_pnl:+,.4f}")
-print(f"  Total trades : {total_trades}")
-print(f"  Open pos     : {count_open()} / {MAX_OPEN_POSITIONS}")
+open_now = count_open()
+print(f"  Cash: ${cash:,.2f}  |  Open: {open_now}/{MAX_OPEN_POSITIONS}  |  Trades: {total_trades}  |  PnL: ${realized_pnl:+,.2f}")
 print()
 
 
 # =============================================================================
-# Step 1 — Fetch candles (once per coin)
+# Step 1 — Fetch candles (4H for signals/entries, 1H for exits on all coins)
 # =============================================================================
-# Detect if this run is at a 4H candle close
-# Cron runs every hour; entries only fire at 4H closes (0,4,8,12,16,20 UTC)
-_now_hour     = datetime.now(timezone.utc).hour
-_is_4h_close  = (_now_hour % 4 == 0)
 
-print("=" * 65)
-print(f"  Fetching 4H candles from CoinDCX...  "
-      f"[{'4H CLOSE — entries active' if _is_4h_close else 'hourly check — exits only'}]")
-print("=" * 65)
+coins_data    = {}   # 4H candles — entries + Ichimoku signals
+coins_data_1h = {}   # 1H candles — HMA exit for ALL coins
 
-# 1H exit coins — fetch 1H candles for exit signal computation
-_1H_EXIT_COINS = {s for s, f in HMA_EXIT_FREQUENCY.items() if f == "1h"}
-
-coins_data    = {}   # 4H candles for entries + Ichimoku
-coins_data_1h = {}   # 1H candles for exit-sensitive coins
-
+fetch_errors = []
 for symbol in COINS:
-    df = fetch_candles(symbol)
-    if df.empty or len(df) < 100:
-        print(f"  {symbol:<14}  SKIP — only {len(df)} bars")
+    df4h = fetch_candles(symbol)
+    if df4h.empty or len(df4h) < 100:
+        fetch_errors.append(symbol)
         continue
-    coins_data[symbol] = df
+    coins_data[symbol] = df4h
 
-    # Fetch 1H candles for exit-sensitive coins
-    if symbol in _1H_EXIT_COINS:
-        df1h = fetch_candles_1h(symbol)
-        if not df1h.empty and len(df1h) >= 100:
-            coins_data_1h[symbol] = df1h
-print()
+    # 1H candles for exit — ALL coins use 1H exit
+    df1h = fetch_candles_1h(symbol)
+    if not df1h.empty and len(df1h) >= 80:
+        coins_data_1h[symbol] = df1h
+
+if fetch_errors:
+    print(f"  FETCH ERRORS: {', '.join(fetch_errors)}")
 
 
 # =============================================================================
-# Step 2 — Compute both signals for every coin
+# Step 2 — Compute signals (4H HMA + Ichimoku for entries/display)
 # =============================================================================
-print("=" * 65)
-print("  Signal state  (HMA + Ichimoku on all 12 coins)")
-print("=" * 65)
-print(f"  {'Coin':<14} {'HMA':^22} {'ICHIMOKU':^26}")
-print(f"  {'':14} {'RSI':>6} {'Gap%':>7} {'Sig':>6}  "
-      f"{'TK':>4} {'Cloud%':>7} {'Sig':>6}")
-print(f"  {'-'*60}")
 
-all_signals = {}   # {(symbol, strategy): sig_dict}
+all_signals = {}
+sig_rows    = []
 
 for symbol, df in coins_data.items():
     hma_sig  = compute_hma_signals(symbol, df)
     ichi_sig = compute_ichimoku_signals(symbol, df)
+    if hma_sig:  all_signals[(symbol, "hma")]      = hma_sig
+    if ichi_sig: all_signals[(symbol, "ichimoku")] = ichi_sig
 
-    if hma_sig:
-        all_signals[(symbol, "hma")] = hma_sig
-    if ichi_sig:
-        all_signals[(symbol, "ichimoku")] = ichi_sig
+    hma_str  = ("ENTRY" if hma_sig and hma_sig["entry_signal"] else
+                "EXIT " if hma_sig and hma_sig["exit_signal"]  else
+                "hold " if hma_sig else "ERR  ")
+    ichi_str = ("ENTRY" if ichi_sig and ichi_sig["entry_signal"] else
+                "EXIT " if ichi_sig and ichi_sig["exit_signal"]  else
+                "hold " if ichi_sig else "ERR  ")
+    rsi_str  = f"{hma_sig['rsi']:>5.1f}" if hma_sig else "  N/A"
+    gap_str  = f"{hma_sig['hma_gap_pct']:>+6.2f}%" if hma_sig else "   N/A"
+    tk_str   = ("BULL" if ichi_sig and ichi_sig.get("tk_bull") else "bear") if ichi_sig else " N/A"
+    cg_str   = f"{ichi_sig.get('cloud_gap_pct',0):>+6.2f}%" if ichi_sig else "   N/A"
+    sig_rows.append(f"  {symbol:<14} {rsi_str} {gap_str} {hma_str}    {tk_str} {cg_str} {ichi_str}")
 
-    # Build display
-    if hma_sig:
-        hma_rsi = f"{hma_sig['rsi']:>5.1f}"
-        hma_gap = f"{hma_sig['hma_gap_pct']:>+6.2f}%"
-        hma_sig_str = "ENTRY " if hma_sig["entry_signal"] else (
-                      "EXIT  " if hma_sig["exit_signal"]  else "hold  ")
-    else:
-        hma_rsi = hma_gap = "  N/A"
-        hma_sig_str = "ERROR "
-
-    if ichi_sig:
-        tk  = "BULL" if ichi_sig.get("tk_bull") else "bear"
-        cg  = f"{ichi_sig.get('cloud_gap_pct',0):>+6.2f}%"
-        ichi_sig_str = "ENTRY " if ichi_sig["entry_signal"] else (
-                       "EXIT  " if ichi_sig["exit_signal"]  else "hold  ")
-    else:
-        tk = " N/A"; cg = "  N/A"
-        ichi_sig_str = "ERROR "
-
-    print(f"  {symbol:<14} {hma_rsi} {hma_gap} {hma_sig_str}  "
-          f"{tk:>4} {cg} {ichi_sig_str}")
+print("=" * 55)
+print("  Signals  (4H HMA + Ichimoku)")
+print(f"  {'Coin':<14} {'RSI':>5} {'Gap%':>7} {'HMA':>5}    {'TK':>4} {'Cld%':>7} {'ICHI':>5}")
+print("  " + "-" * 51)
+for r in sig_rows: print(r)
 print()
 
 
 # =============================================================================
-# Step 3 — Exit pass (all 30 slots)
+# Step 3 — Exit pass (every hourly run — 1H HMA exit for ALL coins)
 # =============================================================================
-print("=" * 65)
-print("  Exit pass")
-print("=" * 65)
+
+print("=" * 55)
+print("  Exit pass  [1H HMA for all HMA | Ichimoku signals]")
+print("=" * 55)
 
 any_exit = False
 for symbol in COINS:
@@ -264,62 +209,49 @@ for symbol in COINS:
         if pos is None:
             continue
 
-        entry_price  = float(pos["Entry Price"])
-        quantity     = float(pos["Quantity"])
-        bars_held    = int(pos.get("Bars_Held", 0))
-        sig          = all_signals.get((symbol, strategy))
+        entry_price = float(pos["Entry Price"])
+        quantity    = float(pos["Quantity"])
+        bars_held   = int(pos.get("Bars_Held", 0))
+        sig_4h      = all_signals.get((symbol, strategy))
 
-        latest_price = (
-            float(coins_data[symbol]["Close"].iloc[-1])
-            if symbol in coins_data else entry_price
-        )
+        latest_price = (float(coins_data[symbol]["Close"].iloc[-1])
+                        if symbol in coins_data else entry_price)
         move_pct    = (latest_price - entry_price) / entry_price
         exit_reason = None
 
-        # Exit checked every hour for ALL coins — no skipping
-        # 1H exit coins: use 1H candles via compute_hma_exit_1h (faster response)
-        # 4H exit coins: use 4H candles but still check every hourly run
-        exit_freq = HMA_EXIT_FREQUENCY.get(symbol, "4h")
-        skip_exit = False  # always check — never wait for 4H close to exit
-
-        # 1H exit coins — use lightweight 1H HMA function
-        if exit_freq == "1h" and strategy == "hma" and symbol in coins_data_1h:
-            sig_1h = compute_hma_exit_1h(symbol, coins_data_1h[symbol])
-        else:
-            sig_1h = None
-
-        # Use 1H signal for exit if available, otherwise use 4H signal
-        exit_sig = sig_1h if sig_1h is not None else sig
-
-        # Stop loss — always checked regardless of frequency
-        if strategy == "hma" and move_pct <= -STOP_LOSS_PCT:
-            exit_reason = "STOP_LOSS"
-        elif not skip_exit and exit_sig and exit_sig["exit_signal"]:
-            if strategy == "ichimoku":
-                exit_reason = ("TK_CROSS_DOWN" if sig.get("tk_bear")
-                               else "BELOW_KIJUN")
+        if strategy == "hma":
+            # Stop loss
+            if move_pct <= -STOP_LOSS_PCT:
+                exit_reason = "STOP_LOSS"
             else:
-                exit_reason = "HMA_CROSS_DOWN_1H" if sig_1h else "HMA_CROSS_DOWN"
+                # 1H HMA exit — ALL coins use this path now
+                if symbol in coins_data_1h:
+                    sig_1h = compute_hma_exit_1h(symbol, coins_data_1h[symbol])
+                    if sig_1h and sig_1h["exit_signal"]:
+                        exit_reason = "HMA_1H_CROSS"
+                else:
+                    # Fallback to 4H signal only if 1H fetch failed
+                    if sig_4h and sig_4h["exit_signal"]:
+                        exit_reason = "HMA_4H_FALLBACK"
+
+        elif strategy == "ichimoku":
+            if sig_4h and sig_4h["exit_signal"]:
+                exit_reason = ("TK_CROSS_DOWN" if sig_4h.get("tk_bear")
+                               else "BELOW_KIJUN")
 
         if exit_reason is None:
-            print(f"  {symbol:<14} [{strategy.upper():<8}]  "
-                  f"HOLDING  entry={entry_price:.4f}  "
-                  f"now={latest_price:.4f}  "
-                  f"move={move_pct:+.2%}  bars={bars_held}")
-            save_position(symbol, strategy,
-                          {**pos, "Bars_Held": bars_held + 1})
+            print(f"  {symbol:<14} [{strategy.upper():<8}]  HOLD  "
+                  f"{move_pct:+.2%}  bars={bars_held}")
+            save_position(symbol, strategy, {**pos, "Bars_Held": bars_held + 1})
             continue
 
         # Execute exit
         pnl     = move_pct * entry_price * quantity
         comm    = latest_price * quantity * COMMISSION
         net_pnl = pnl - comm if TRADING_MODE == "paper" else pnl
-        sign    = "+" if net_pnl >= 0 else ""
 
-        print(f"  {symbol:<14} [{strategy.upper():<8}]  "
-              f"EXIT [{exit_reason}]  "
-              f"{entry_price:.4f} → {latest_price:.4f}  "
-              f"move={move_pct:+.2%}  PnL=${net_pnl:+.4f}")
+        print(f"  {symbol:<14} [{strategy.upper():<8}]  EXIT [{exit_reason}]  "
+              f"{entry_price:.4f}→{latest_price:.4f}  {move_pct:+.2%}  PnL=${net_pnl:+.2f}")
 
         realized_pnl += net_pnl
         total_trades += 1
@@ -327,20 +259,17 @@ for symbol in COINS:
         cash         += entry_price * quantity + net_pnl
         any_exit      = True
 
-        run_events.append(
-            f"{symbol}[{strategy[:4].upper()}] {net_pnl:+.2f} {exit_reason}"
-        )
+        run_events.append(f"{symbol}[{strategy[:4].upper()}] {net_pnl:+.2f} {exit_reason}")
 
         log_trade(symbol, strategy, {
             "Coin":        symbol,
             "Strategy":    strategy,
-            "Side":        "LONG",
             "Entry Price": entry_price,
             "Exit Price":  round(latest_price, 8),
             "Quantity":    quantity,
             "PnL":         round(net_pnl, 6),
             "Exit Reason": exit_reason,
-            "Exit Time":   datetime.now(timezone.utc).isoformat(),
+            "Exit Time":   _now_utc.isoformat(),
         })
 
         notify_exit(symbol, strategy, entry_price, latest_price,
@@ -358,121 +287,91 @@ print()
 
 
 # =============================================================================
-# Step 4 — Entry pass (only on 4H candle closes)
+# Step 4 — Entry pass (4H candle closes only)
 # =============================================================================
-print("=" * 65)
-print("  Entry pass  (priority: double-confirmed > single signal)")
-print("=" * 65)
+
+print("=" * 55)
+print("  Entry pass")
+print("=" * 55)
 
 equity_now = current_equity(cash, coins_data)
-open_count  = count_open()
+open_count = count_open()
 
-# Entries only fire at 4H candle closes — not on hourly exit checks
 if not _is_4h_close:
-    print("  Hourly run — entries skipped (next 4H close for entries)")
+    print("  Skipped — not a 4H close.")
     raw_candidates = []
 else:
-    # Build all entry candidates
-    raw_candidates = []
-    for symbol in COINS:
-        for strategy in STRATEGIES:
-            sig = all_signals.get((symbol, strategy))
-            if sig and sig["entry_signal"] and load_position(symbol, strategy) is None:
-                raw_candidates.append((symbol, strategy, sig))
+    raw_candidates = [
+        (sym, strat, sig)
+        for sym in COINS
+        for strat in STRATEGIES
+        if (sig := all_signals.get((sym, strat))) and
+           sig["entry_signal"] and
+           load_position(sym, strat) is None
+    ]
 
-# Check if the OTHER strategy also fired on same coin — used for priority
-double_confirmed_coins = set()
+# Double-confirmed priority
 entry_coins = {}
-for symbol, strategy, sig in raw_candidates:
-    if symbol not in entry_coins:
-        entry_coins[symbol] = []
-    entry_coins[symbol].append(strategy)
-for symbol, strats in entry_coins.items():
-    if len(strats) >= 2:
-        double_confirmed_coins.add(symbol)
+for sym, strat, sig in raw_candidates:
+    entry_coins.setdefault(sym, []).append(strat)
+double_confirmed = {sym for sym, strats in entry_coins.items() if len(strats) >= 2}
 
-# Sort: double-confirmed first, then by COINS list order
-def priority_key(candidate):
-    symbol, strategy, sig = candidate
-    is_double = 0 if symbol in double_confirmed_coins else 1
-    coin_rank  = COINS.index(symbol) if symbol in COINS else 99
-    strat_rank = 0 if strategy == "hma" else 1
-    return (is_double, coin_rank, strat_rank)
-
-candidates = sorted(raw_candidates, key=priority_key)
+candidates = sorted(raw_candidates, key=lambda c: (
+    0 if c[0] in double_confirmed else 1,
+    COINS.index(c[0]) if c[0] in COINS else 99,
+    0 if c[1] == "hma" else 1,
+))
 
 if not candidates:
-    print("  No entry signals this run.")
+    print("  No entry signals." if _is_4h_close else "")
 else:
-    print(f"  {len(candidates)} signal(s) found:")
-    for symbol, strategy, sig in candidates:
-        dbl = " ★DOUBLE" if symbol in double_confirmed_coins else ""
-        print(f"    {symbol:<14} [{strategy.upper():<8}]{dbl}  "
-              f"close={sig['close']:.4f}")
+    print(f"  {len(candidates)} signal(s):")
+    for sym, strat, sig in candidates:
+        dbl = " ★DOUBLE" if sym in double_confirmed else ""
+        print(f"    {sym:<14} [{strat.upper():<8}]{dbl}  @ {sig['close']:.4f}")
     print()
 
-    for symbol, strategy, sig in candidates:
+    for sym, strat, sig in candidates:
         if open_count >= MAX_OPEN_POSITIONS:
-            print(f"  {symbol:<14} [{strategy.upper():<8}]  "
-                  f"BLOCKED — max positions ({open_count}/{MAX_OPEN_POSITIONS})")
+            print(f"  {sym} [{strat.upper()}]  BLOCKED — max positions")
             continue
-
         allocation = equity_now * ALLOCATION_PCT
         if cash < allocation or allocation <= 0:
-            print(f"  {symbol:<14} [{strategy.upper():<8}]  "
-                  f"BLOCKED — insufficient cash "
-                  f"(need ${allocation:.2f}, have ${cash:.2f})")
+            print(f"  {sym} [{strat.upper()}]  BLOCKED — insufficient cash")
             continue
 
         latest_price = sig["close"]
         quantity     = (allocation * POSITION_SIZE) / latest_price
+        dbl_str      = " ★DOUBLE" if sym in double_confirmed else ""
 
-        dbl_str = " ★DOUBLE CONFIRMED" if symbol in double_confirmed_coins else ""
-        print(f"  {symbol:<14} [{strategy.upper():<8}]  "
-              f"ENTERING LONG{dbl_str}")
-        print(f"    Price      : ${latest_price:.4f}")
-        print(f"    Allocation : ${allocation:.2f}  "
-              f"({ALLOCATION_PCT:.0%} of ${equity_now:.2f})")
-        print(f"    Quantity   : {quantity:.6f}")
-
-        if strategy == "ichimoku":
-            print(f"    TK cross   : BULLISH")
-            print(f"    Chikou     : {'OK' if sig.get('chikou_ok') else 'WEAK'}")
-            print(f"    Cloud gap  : {sig.get('cloud_gap_pct',0):+.2f}%")
-            print(f"    Stop       : TK cross down / below Kijun "
-                  f"(${sig.get('kijun',0):.4f})")
-        else:
-            print(f"    RSI        : {sig.get('rsi',0):.1f}")
-            print(f"    HMA gap    : {sig.get('hma_gap_pct',0):+.2f}%")
-            print(f"    Stop       : ${latest_price*(1-STOP_LOSS_PCT):.4f}  "
-                  f"(-{STOP_LOSS_PCT:.0%})")
+        print(f"  {sym:<14} [{strat.upper():<8}]  ENTRY{dbl_str}  "
+              f"@ ${latest_price:.4f}  qty={quantity:.6f}  alloc=${allocation:.2f}")
 
         if TRADING_MODE == "live":
             from exchange import place_market_order, get_order_status
             import time as _t
-            order_id = place_market_order(symbol, "buy", quantity)
+            order_id = place_market_order(sym, "buy", quantity)
             if order_id is None:
                 print(f"    ORDER FAILED — skipping")
                 continue
             _t.sleep(1.5)
-            info        = get_order_status(order_id)
-            fill_px     = float(info.get("avg_price", latest_price) or latest_price)
-            fill_qty    = float(info.get("total_quantity", quantity) or quantity) \
-                        - float(info.get("remaining_quantity", 0) or 0)
-            fill_status = info.get("status", "unknown")
-            if fill_status not in ("filled", "partially_filled"):
-                print(f"    Not filled ({fill_status}) — skipping")
+            info     = get_order_status(order_id)
+            fill_px  = float(info.get("avg_price", latest_price) or latest_price)
+            fill_qty = float(info.get("total_quantity", quantity) or quantity) \
+                     - float(info.get("remaining_quantity", 0) or 0)
+            if info.get("status") not in ("filled", "partially_filled"):
+                print(f"    Not filled — skipping")
                 continue
             latest_price = fill_px
             quantity     = fill_qty
 
-        save_position(symbol, strategy, {
-            "Coin":        symbol,
-            "Strategy":    strategy,
+        save_position(sym, strat, {
+            "Coin":        sym,
+            "Strategy":    strat,
             "Side":        "LONG",
             "Entry Price": latest_price,
             "Quantity":    quantity,
-            "Timestamp":   datetime.now(timezone.utc).isoformat(),
+            "Timestamp":   _now_utc.isoformat(),
             "Bars_Held":   0,
         })
 
@@ -480,96 +379,62 @@ else:
         open_count  += 1
         total_trades += 1
         trades_run   += 1
-        run_events.append(
-            f"{symbol}[{strategy[:4].upper()}] ENTRY @ {latest_price:.4f}"
-        )
+        run_events.append(f"{sym}[{strat[:4].upper()}] ENTRY @ {latest_price:.4f}")
 
-        notify_entry(symbol, strategy, latest_price, quantity, allocation, sig)
-        print(f"    Entered @ ${latest_price:.4f}")
-        print()
+        notify_entry(sym, strat, latest_price, quantity, allocation, sig)
+
 print()
 
 
 # =============================================================================
 # Step 5 — Portfolio snapshot
 # =============================================================================
+
 equity_final = current_equity(cash, coins_data)
 open_count   = count_open()
-
 unrealized = 0.0
 for s in COINS:
-    for strat in STRATEGIES:
-        pos = load_position(s, strat)
-        if pos is None:
-            continue
+    for st in STRATEGIES:
+        pos = load_position(s, st)
+        if pos is None: continue
         ep  = float(pos["Entry Price"])
         qty = float(pos["Quantity"])
         cp  = float(coins_data[s]["Close"].iloc[-1]) if s in coins_data else ep
-        # Unrealized PnL = (current price - entry price) x quantity
         unrealized += (cp - ep) * qty
 
-log_portfolio(
-    cash, equity_final, open_count,
-    realized_pnl, unrealized, total_trades, run_events
-)
+log_portfolio(cash, equity_final, open_count, realized_pnl, unrealized, total_trades, run_events)
 notify_run_summary(equity_final, cash, open_count, realized_pnl)
 
-print("=" * 65)
-print("  Portfolio Snapshot")
-print("=" * 65)
-print(f"  Mode          : {TRADING_MODE.upper()}")
-print(f"  Cash          : ${cash:,.4f}")
-print(f"  Unrealized    : ${unrealized:+,.4f}")
-print(f"  Equity        : ${equity_final:,.4f}")
-print(f"  Realized PnL  : ${realized_pnl:+,.4f}")
-print(f"  Return        : {(equity_final/INITIAL_CAPITAL-1)*100:+.2f}%")
-print(f"  Open positions: {open_count} / {MAX_OPEN_POSITIONS}")
-print(f"  Trades today  : {trades_run}")
-print(f"  Total trades  : {total_trades}")
-print()
+ret_pct = (equity_final / INITIAL_CAPITAL - 1) * 100
+print("=" * 55)
+print(f"  Cash: ${cash:,.2f}  Unreal: ${unrealized:+,.2f}  Equity: ${equity_final:,.2f}")
+print(f"  Return: {ret_pct:+.2f}%  |  PnL: ${realized_pnl:+,.2f}  |  Open: {open_count}/{MAX_OPEN_POSITIONS}")
 
+# Open positions summary
 if open_count > 0:
-    print("=" * 65)
-    print("  Open Positions")
-    print("=" * 65)
+    print()
+    print("  Open positions:")
     for s in COINS:
-        for strat in STRATEGIES:
-            pos = load_position(s, strat)
-            if pos is None:
-                continue
+        for st in STRATEGIES:
+            pos = load_position(s, st)
+            if pos is None: continue
             ep   = float(pos["Entry Price"])
             qty  = float(pos["Quantity"])
             bars = int(pos.get("Bars_Held", 0))
             cp   = float(coins_data[s]["Close"].iloc[-1]) if s in coins_data else ep
             move = (cp - ep) / ep
-            pnl  = (cp - ep) * qty   # unrealized PnL = price diff x qty
-            sign = "+" if pnl >= 0 else ""
-            sig  = all_signals.get((s, strat))
+            pnl  = (cp - ep) * qty
+            sig  = all_signals.get((s, st))
+            gap_str = ""
+            if sig and st == "hma":
+                gap = sig.get("hma_gap_pct", 0)
+                label = "ext" if gap > 5 else "ok" if gap > 1 else "weak" if gap > 0 else "EXIT"
+                gap_str = f"  gap={gap:+.2f}%({label})"
+            elif sig and st == "ichimoku":
+                gap_str = f"  cloud={sig.get('cloud_gap_pct',0):+.2f}%"
+            print(f"    {s} [{st.upper():<8}]  entry=${ep:.4f}  now=${cp:.4f}  "
+                  f"{move:+.2%}  PnL=${pnl:+.2f}  bars={bars}{gap_str}")
 
-            print(f"  {s}  [{strat.upper()}]")
-            print(f"    Entry    : ${ep:.4f}")
-            print(f"    Current  : ${cp:.4f}")
-            print(f"    Move     : {move:+.2%}")
-            print(f"    Unrealized PnL: {sign}${abs(pnl):.4f}")
-            print(f"    Bars held: {bars}")
-            if sig:
-                if strat == "ichimoku":
-                    tk = "BULL" if not sig.get("tk_bear") else "BEAR — EXIT SOON"
-                    print(f"    TK status: {tk}")
-                    print(f"    Cloud gap: {sig.get('cloud_gap_pct',0):+.2f}%")
-                else:
-                    gap = sig.get("hma_gap_pct", 0)
-                    if gap > 5.0:
-                        gap_label = "extended"
-                    elif gap > 1.0:
-                        gap_label = "trend intact"
-                    elif gap > 0:
-                        gap_label = "weakening"
-                    else:
-                        gap_label = "exit imminent"
-                    print(f"    HMA gap  : {gap:+.2f}%  ({gap_label})")
-            print()
-
-print("=" * 65)
-print(f"  Done.  [{'4H close' if _is_4h_close else 'hourly exit check'}]  Next run: :05 past next hour")
-print("=" * 65)
+print()
+print(f"  Done. [{'4H close' if _is_4h_close else 'hourly exit'}]  Next: :05 past next hour")
+print("=" * 55)

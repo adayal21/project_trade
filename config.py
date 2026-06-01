@@ -74,24 +74,22 @@ RSI_THRESHOLD_OVERRIDE = {
     "ETH/USDT": 50,
 }
 
-# Per-coin exit frequency — based on backtest analysis
-# "1h" = check exit every hour (catches fast reversals)
-# "4h" = check exit only on 4H candle close (better for slow steady trends)
-# BTC/ETH/DOGE/XRP/SOL perform better with 4H exit (slow trends)
-# ADA/BNB/AVAX/LINK/ZEC/JASMY/POL perform better with 1H exit
+# Exit frequency — ALL coins use 1H exit (backtest validated: best Sharpe 0.98,
+# lowest drawdown -24.7%, best profit factor 1.68 vs 4H+4H combo)
+# Entry remains 4H only. Exit checked every hourly cron run via 1H candles.
 HMA_EXIT_FREQUENCY = {
-    "BTC/USDT":   "4h",   # 4H better: +138.6% vs +92.7%
-    "ETH/USDT":   "4h",   # 4H better: +49.3% vs -10.2%
-    "DOGE/USDT":  "4h",   # 4H better: +361.7% vs -16.6%
-    "XRP/USDT":   "4h",   # 4H better: +145.3% vs +23.5%
-    "SOL/USDT":   "4h",   # 4H better: +66.9% vs +35.1%
-    "ADA/USDT":   "1h",   # 1H better: +157.0% vs +29.2%
-    "BNB/USDT":   "1h",   # 1H better: +30.6% vs +21.9%
-    "AVAX/USDT":  "1h",   # 1H better: +292.0% vs -1.2%
-    "LINK/USDT":  "1h",   # 1H better: +155.0% vs -43.0%
-    "ZEC/USDT":   "1h",   # 1H better: +689.4% vs +607.5%
-    "JASMY/USDT": "1h",   # 1H better: +415.3% vs -35.9%
-    "POL/USDT":   "1h",   # 1H better: -4.4% vs -12.7%
+    "BTC/USDT":   "1h",
+    "ETH/USDT":   "1h",
+    "DOGE/USDT":  "1h",
+    "XRP/USDT":   "1h",
+    "SOL/USDT":   "1h",
+    "ADA/USDT":   "1h",
+    "BNB/USDT":   "1h",
+    "AVAX/USDT":  "1h",
+    "LINK/USDT":  "1h",
+    "ZEC/USDT":   "1h",
+    "JASMY/USDT": "1h",
+    "POL/USDT":   "1h",
 }
 
 # Per-coin HMA gap filter for mid-trend entry — based on backtest analysis
