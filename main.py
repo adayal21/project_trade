@@ -276,18 +276,19 @@ for symbol in COINS:
         move_pct    = (latest_price - entry_price) / entry_price
         exit_reason = None
 
-        # Per-coin exit frequency check
+        # Exit checked every hour for ALL coins — no skipping
+        # 1H exit coins: use 1H candles via compute_hma_exit_1h (faster response)
+        # 4H exit coins: use 4H candles but still check every hourly run
         exit_freq = HMA_EXIT_FREQUENCY.get(symbol, "4h")
-        skip_exit = (exit_freq == "4h" and not _is_4h_close)
+        skip_exit = False  # always check — never wait for 4H close to exit
 
-        # For 1H exit coins — use lightweight 1H exit function
-        # Does not use YouTuber's library, avoids linreg_4h column issue
+        # 1H exit coins — use lightweight 1H HMA function
         if exit_freq == "1h" and strategy == "hma" and symbol in coins_data_1h:
             sig_1h = compute_hma_exit_1h(symbol, coins_data_1h[symbol])
         else:
             sig_1h = None
 
-        # Use 1H signal for exit if available, otherwise fall back to 4H
+        # Use 1H signal for exit if available, otherwise use 4H signal
         exit_sig = sig_1h if sig_1h is not None else sig
 
         # Stop loss — always checked regardless of frequency
