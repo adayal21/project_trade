@@ -30,6 +30,7 @@ from config import (
 )
 from bot_utils import (
     fetch_candles,
+    fetch_candles_1h,
     compute_hma_signals,
     compute_ichimoku_signals,
     notify_entry, notify_exit, notify_run_summary,
@@ -182,17 +183,24 @@ print(f"  Fetching 4H candles from CoinDCX...  "
       f"[{'4H CLOSE — entries active' if _is_4h_close else 'hourly check — exits only'}]")
 print("=" * 65)
 
-coins_data = {}
+# 1H exit coins — fetch 1H candles for exit signal computation
+_1H_EXIT_COINS = {s for s, f in HMA_EXIT_FREQUENCY.items() if f == "1h"}
+
+coins_data    = {}   # 4H candles for entries + Ichimoku
+coins_data_1h = {}   # 1H candles for exit-sensitive coins
+
 for symbol in COINS:
     df = fetch_candles(symbol)
     if df.empty or len(df) < 100:
         print(f"  {symbol:<14}  SKIP — only {len(df)} bars")
         continue
     coins_data[symbol] = df
-    # print(f"  {symbol:<14}  {len(df):>4} bars  "
-    #       f"({df.index.min().strftime('%Y-%m-%d')} → "
-    #       f"{df.index.max().strftime('%Y-%m-%d')})  "
-    #       f"close={df['Close'].iloc[-1]:.4f}")
+
+    # Fetch 1H candles for exit-sensitive coins
+    if symbol in _1H_EXIT_COINS:
+        df1h = fetch_candles_1h(symbol)
+        if not df1h.empty and len(df1h) >= 100:
+            coins_data_1h[symbol] = df1h
 print()
 
 
@@ -269,20 +277,27 @@ for symbol in COINS:
         exit_reason = None
 
         # Per-coin exit frequency check
-        # 1H-exit coins: always check exit signal
-        # 4H-exit coins: only check exit on 4H candle close runs
         exit_freq = HMA_EXIT_FREQUENCY.get(symbol, "4h")
         skip_exit = (exit_freq == "4h" and not _is_4h_close)
+
+        # For 1H exit coins — recompute HMA signal on 1H candles
+        if exit_freq == "1h" and strategy == "hma" and symbol in coins_data_1h:
+            sig_1h = compute_hma_signals(symbol, coins_data_1h[symbol])
+        else:
+            sig_1h = None
+
+        # Use 1H signal for exit if available, otherwise fall back to 4H
+        exit_sig = sig_1h if sig_1h is not None else sig
 
         # Stop loss — always checked regardless of frequency
         if strategy == "hma" and move_pct <= -STOP_LOSS_PCT:
             exit_reason = "STOP_LOSS"
-        elif not skip_exit and sig and sig["exit_signal"]:
+        elif not skip_exit and exit_sig and exit_sig["exit_signal"]:
             if strategy == "ichimoku":
                 exit_reason = ("TK_CROSS_DOWN" if sig.get("tk_bear")
                                else "BELOW_KIJUN")
             else:
-                exit_reason = "HMA_CROSS_DOWN"
+                exit_reason = "HMA_CROSS_DOWN_1H" if sig_1h else "HMA_CROSS_DOWN"
 
         if exit_reason is None:
             print(f"  {symbol:<14} [{strategy.upper():<8}]  "

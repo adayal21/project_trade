@@ -1,11 +1,12 @@
 """
 bot_utils.py — Data fetching + signal computation for the Combined Bot.
 
-Both HMA and Ichimoku run independently on ALL 15 coins.
+Both HMA and Ichimoku run independently on ALL 12 coins.
 Each strategy can open its own separate position on the same coin.
 
 Functions:
-    fetch_candles(symbol)              → OHLCV DataFrame from CoinDCX
+    fetch_candles(symbol)              → OHLCV DataFrame from CoinDCX (4H)
+    fetch_candles_1h(symbol)           → OHLCV DataFrame from CoinDCX (1H)
     compute_hma_signals(symbol, df)    → HMA signal dict
     compute_ichimoku_signals(symbol, df) → Ichimoku signal dict
 """
@@ -47,28 +48,28 @@ def _order_symbol(symbol: str) -> str:
 
 
 # =============================================================================
-# OHLCV fetching
+# Generic OHLCV fetcher (shared logic)
 # =============================================================================
 
-def fetch_candles(symbol: str) -> pd.DataFrame:
-    """Fetch WARMUP_BARS of 4H candles from CoinDCX public API."""
+def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
+                 warmup_bars: int) -> pd.DataFrame:
     pair     = _candle_pair(symbol)
     now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = now_ms - (WARMUP_BARS * INTERVAL_MS)
+    start_ms = now_ms - (warmup_bars * interval_ms)
     all_rows = []
     retries  = 0
     cur      = start_ms
 
     while cur < now_ms:
-        end_ms = min(cur + CANDLES_LIMIT * INTERVAL_MS, now_ms)
+        end_ms = min(cur + CANDLES_LIMIT * interval_ms, now_ms)
         params = {
-            "pair": pair, "interval": TIMEFRAME,
+            "pair": pair, "interval": interval,
             "startTime": cur, "endTime": end_ms,
             "limit": CANDLES_LIMIT,
         }
         try:
             resp = requests.get(CANDLES_URL, params=params, timeout=20)
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException:
             retries += 1
             if retries > 3:
                 return pd.DataFrame()
@@ -93,7 +94,7 @@ def fetch_candles(symbol: str) -> pd.DataFrame:
 
         if isinstance(candles, list) and candles:
             all_rows.extend(candles)
-        cur = end_ms + INTERVAL_MS
+        cur = end_ms + interval_ms
         time.sleep(0.3)
 
     if not all_rows:
@@ -131,6 +132,20 @@ def fetch_candles(symbol: str) -> pd.DataFrame:
 
 
 # =============================================================================
+# OHLCV fetching — public API
+# =============================================================================
+
+def fetch_candles(symbol: str) -> pd.DataFrame:
+    """Fetch WARMUP_BARS of 4H candles from CoinDCX — used for entries."""
+    return _fetch_ohlcv(symbol, TIMEFRAME, INTERVAL_MS, WARMUP_BARS)
+
+
+def fetch_candles_1h(symbol: str) -> pd.DataFrame:
+    """Fetch 300 bars of 1H candles from CoinDCX — used for 1H exit detection."""
+    return _fetch_ohlcv(symbol, "1h", 3_600_000, 300)
+
+
+# =============================================================================
 # HMA signal computation
 # =============================================================================
 
@@ -140,6 +155,7 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     Uses utils.prepare_dataset() — the YouTuber's validated indicator code.
     RSI threshold is per-coin: BTC/ETH use 50, all others use 52.
     Gap filter: DOGE/ETH/XRP/BNB allow mid-trend entry when gap ≤ 2%.
+    Works on both 4H candles (entry) and 1H candles (exit detection).
     """
     if len(df) < _MIN_BARS_HMA:
         return None
@@ -172,16 +188,13 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     )
 
     # Per-coin gap filter for mid-trend entry
-    # If coin has a gap filter, allow entry when gap is positive but ≤ max_gap%
-    # Otherwise use standard crossover signal only
     gap_filter = HMA_GAP_FILTER.get(symbol)
     if gap_filter is not None:
-        # Mid-trend entry: HMA fast > slow + gap ≤ filter + RSI ok (already in prepared)
-        hma_gap_frac = hma_gap / 100
+        hma_gap_frac    = hma_gap / 100
         mid_trend_entry = (
             float(row["hma_fast"]) > float(row["hma_slow"]) and
             0 < hma_gap_frac <= gap_filter and
-            bool(row["entry_long"] == 1 or  # also fire on crossover
+            bool(row["entry_long"] == 1 or
                  (float(row["rsi"]) > RSI_THRESHOLD_OVERRIDE.get(symbol, RSI_THRESHOLD)))
         )
         entry_signal = bool(row["entry_long"] == 1) or mid_trend_entry
@@ -191,7 +204,7 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     return {
         "strategy":     "hma",
         "entry_signal": entry_signal,
-        "exit_signal":  bool(row["exit_long"]  == 1),
+        "exit_signal":  bool(row["exit_long"] == 1),
         "close":        float(row["Close"]),
         "hma_fast":     float(row["hma_fast"]),
         "hma_slow":     float(row["hma_slow"]),
@@ -209,18 +222,13 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame) -> dict | None:
 
 def compute_ichimoku_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     """
-    YouTuber Abhishek's 3-condition Ichimoku entry:
+    Ichimoku entry conditions (per-coin chikou override):
+      ETH/BNB : TK cross + chikou + above cloud (strict)
+      Others  : TK cross + above cloud (no chikou — backtest validated)
 
-    LONG entry — all 3 required:
-        1. Tenkan crosses ABOVE Kijun (TK bullish crossover)
-        2. Close > close from 26 bars ago (Chikou above past price)
-        3. Close > cloud top (price outside and above cloud)
-
-    EXIT — either:
-        - Tenkan crosses BELOW Kijun
-        - Close < Kijun (Kijun acts as dynamic stop loss)
-
-    Settings: 9/26/52 (original Japanese)
+    Exit:
+      - Tenkan crosses below Kijun
+      - Close < Kijun
     """
     if len(df) < _MIN_BARS_ICHI:
         return None
@@ -253,17 +261,15 @@ def compute_ichimoku_signals(symbol: str, df: pd.DataFrame) -> dict | None:
         latest = d.iloc[-1]
         prev   = d.iloc[-2]
 
-        tk_bull = (float(latest["tenkan"]) > float(latest["kijun"]) and
-                   float(prev["tenkan"])   <= float(prev["kijun"]))
-        tk_bear = (float(latest["tenkan"]) < float(latest["kijun"]) and
-                   float(prev["tenkan"])   >= float(prev["kijun"]))
-
+        tk_bull     = (float(latest["tenkan"]) > float(latest["kijun"]) and
+                       float(prev["tenkan"])   <= float(prev["kijun"]))
+        tk_bear     = (float(latest["tenkan"]) < float(latest["kijun"]) and
+                       float(prev["tenkan"])   >= float(prev["kijun"]))
         chikou_bull = float(latest["Close"]) > float(latest["chikou_ref"])
         above_cloud = float(latest["Close"]) > float(latest["cloud_top"])
         below_kijun = float(latest["Close"]) < float(latest["kijun"])
 
         require_chikou = ICHI_REQUIRE_CHIKOU.get(symbol, False)
-
         if require_chikou:
             entry_signal = tk_bull and chikou_bull and above_cloud
         else:
@@ -276,21 +282,21 @@ def compute_ichimoku_signals(symbol: str, df: pd.DataFrame) -> dict | None:
         )
 
         return {
-            "strategy":     "ichimoku",
-            "entry_signal": entry_signal,
-            "exit_signal":  tk_bear or below_kijun,
-            "close":        float(latest["Close"]),
-            "tenkan":       float(latest["tenkan"]),
-            "kijun":        float(latest["kijun"]),
-            "cloud_top":    float(latest["cloud_top"]),
-            "cloud_bottom": float(latest["cloud_bottom"]),
-            "cloud_gap_pct":round(cloud_gap, 2),
-            "tk_bull":      tk_bull,
-            "tk_bear":      tk_bear,
-            "chikou_ok":    chikou_bull,
-            "above_cloud":  above_cloud,
-            "bars":         len(d),
-            "bar_time":     str(latest.name),
+            "strategy":      "ichimoku",
+            "entry_signal":  entry_signal,
+            "exit_signal":   tk_bear or below_kijun,
+            "close":         float(latest["Close"]),
+            "tenkan":        float(latest["tenkan"]),
+            "kijun":         float(latest["kijun"]),
+            "cloud_top":     float(latest["cloud_top"]),
+            "cloud_bottom":  float(latest["cloud_bottom"]),
+            "cloud_gap_pct": round(cloud_gap, 2),
+            "tk_bull":       tk_bull,
+            "tk_bear":       tk_bear,
+            "chikou_ok":     chikou_bull,
+            "above_cloud":   above_cloud,
+            "bars":          len(d),
+            "bar_time":      str(latest.name),
         }
 
     except Exception as e:
