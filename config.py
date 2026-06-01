@@ -5,7 +5,7 @@
 #   HMA       : HMA(16/64) + RSI(14) + LinReg(50) on 4H
 #   Ichimoku  : TK cross + Chikou + Above cloud on 4H
 #
-# Cron: 5 0,4,8,12,16,20 * * *  (every 4 hours, no change)
+# Cron: 5 * * * *  (every hour — exits checked hourly, entries at 4H closes)
 # =============================================================================
 
 import os

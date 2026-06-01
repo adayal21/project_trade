@@ -1,21 +1,21 @@
 """
 main.py — HMA + Ichimoku Combined Crypto Bot
 =============================================
-Both HMA and Ichimoku run independently on ALL 15 coins.
+Both HMA and Ichimoku run independently on ALL 12 coins.
 Each strategy manages its own separate position per coin.
-Total potential slots: 30 (15 coins × 2 strategies).
-Max active positions: 8 at any time, 10% allocation each.
+Total potential slots: 24 (12 coins × 2 strategies).
+Max active positions: 4 at any time, 20% allocation each.
 
 Position files use strategy suffix:
     data/BTC_USDT_hma_position.csv
     data/BTC_USDT_ichi_position.csv
 
-Priority when more than 8 signals fire simultaneously:
+Priority when more than 4 signals fire simultaneously:
     1. Double-confirmed (both HMA AND Ichimoku fire on same coin) → first
     2. Single-strategy signals → by coin order in COINS list
 
-Cron (unchanged):
-    5 0,4,8,12,16,20 * * * cd ~/Projects/crypto_bot && python main.py >> data/bot.log 2>&1
+Cron (hourly — exits checked every hour, entries only at 4H closes):
+    5 * * * * cd ~/Projects/project_trade && echo "========================================" >> logs/live.log && TZ=Asia/Kolkata date >> logs/live.log && /home/g12amandayal12/Projects/venv/bin/python main.py >> logs/live.log 2>&1
 """
 
 import os
@@ -174,8 +174,7 @@ print()
 # =============================================================================
 # Detect if this run is at a 4H candle close
 # Cron runs every hour; entries only fire at 4H closes (0,4,8,12,16,20 UTC)
-from datetime import datetime, timezone as _tz
-_now_hour     = datetime.now(_tz.utc).hour
+_now_hour     = datetime.now(timezone.utc).hour
 _is_4h_close  = (_now_hour % 4 == 0)
 
 print("=" * 65)
@@ -208,7 +207,7 @@ print()
 # Step 2 — Compute both signals for every coin
 # =============================================================================
 print("=" * 65)
-print("  Signal state  (HMA + Ichimoku on all 15 coins)")
+print("  Signal state  (HMA + Ichimoku on all 12 coins)")
 print("=" * 65)
 print(f"  {'Coin':<14} {'HMA':^22} {'ICHIMOKU':^26}")
 print(f"  {'':14} {'RSI':>6} {'Gap%':>7} {'Sig':>6}  "
@@ -557,10 +556,17 @@ if open_count > 0:
                     print(f"    Cloud gap: {sig.get('cloud_gap_pct',0):+.2f}%")
                 else:
                     gap = sig.get("hma_gap_pct", 0)
-                    print(f"    HMA gap  : {gap:+.2f}%  "
-                          f"({'exit near' if gap > -0.5 else 'trend intact'})")
+                    if gap > 5.0:
+                        gap_label = "extended"
+                    elif gap > 1.0:
+                        gap_label = "trend intact"
+                    elif gap > 0:
+                        gap_label = "weakening"
+                    else:
+                        gap_label = "exit imminent"
+                    print(f"    HMA gap  : {gap:+.2f}%  ({gap_label})")
             print()
 
 print("=" * 65)
-print(f"  Done.  Next run: next 4H candle close + 5 min")
+print(f"  Done.  [{'4H close' if _is_4h_close else 'hourly exit check'}]  Next run: :05 past next hour")
 print("=" * 65)

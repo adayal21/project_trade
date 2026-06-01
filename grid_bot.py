@@ -21,25 +21,20 @@ from __future__ import annotations
 import os
 import json
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from config import TRADING_MODE, COMMISSION
-from grid_config import GRID_COINS, GRID_DATA_DIR, COIN_PRECISION, COIN_MIN_QTY, COIN_PRECISION, COIN_MIN_QTY
+from grid_config import GRID_COINS, GRID_DATA_DIR, COIN_PRECISION, COIN_MIN_QTY
 from bot_utils import _telegram
 
 # =============================================================================
-# Helpers
+# IST timestamp helper
 # =============================================================================
-def _round_qty(symbol: str, qty: float) -> float:
-    """Round quantity to coin precision and check minimum."""
-    precision = COIN_PRECISION.get(symbol, 4)
-    min_qty   = COIN_MIN_QTY.get(symbol, 0.0)
-    rounded   = round(qty, precision)
-    return rounded if rounded >= min_qty else 0.0
+def _ist_now() -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M IST")
 
 # =============================================================================
-# Helpers
+# Quantity helpers
 # =============================================================================
-
 def _round_qty(symbol: str, qty: float) -> float:
     """Round quantity to CoinDCX required precision."""
     precision = COIN_PRECISION.get(symbol, 6)
@@ -49,7 +44,6 @@ def _check_min_qty(symbol: str, qty: float) -> bool:
     """Check if quantity meets CoinDCX minimum."""
     min_qty = COIN_MIN_QTY.get(symbol, 0.0)
     return qty >= min_qty
-
 
 # =============================================================================
 # Constants
@@ -83,9 +77,9 @@ def load_state(symbol):
             return json.load(fh)
     return {
         "reference_price":  None,
-        "waiting_reset":    False,  # True = one idle run before fresh start
+        "waiting_reset":    False,
         "positions":        [],
-        "levels_bought":    [],     # which drop levels already bought
+        "levels_bought":    [],
         "deployed":         0.0,
         "coin_cash":        COIN_CAPITAL,
         "realized_pnl":     0.0,
@@ -115,7 +109,7 @@ def load_portfolio():
 def log_portfolio(cash, equity, unrealized, realized_pnl, total_trades, open_pos):
     f   = _portfolio_file()
     row = pd.DataFrame([{
-        "Timestamp":      datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "Timestamp":      _ist_now(),
         "Cash":           round(cash, 2),
         "Equity":         round(equity, 2),
         "Unrealized PnL": round(unrealized, 2),
@@ -159,7 +153,6 @@ def update_coin(symbol, df):
     prev        = df.iloc[-2]
     price       = float(latest["Close"])
     candle_high = float(latest["High"])
-    candle_low  = float(latest["Low"])
     ts          = str(latest.name)
 
     net_pnl      = 0.0
@@ -175,13 +168,11 @@ def update_coin(symbol, df):
 
     # ── First run: set reference and buy 5% baseline ──────────────
     if ref_price is None:
-        ref_price    = price
-        buy_amount   = min(FIRST_RUN_PCT * cash, COIN_CAPITAL * 0.99)
+        ref_price  = price
+        buy_amount = min(FIRST_RUN_PCT * cash, COIN_CAPITAL * 0.99)
         if buy_amount >= 1.0:
-            qty    = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
-            if qty == 0.0:
-                buy_amount = 0.0
-            else:
+            qty = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
+            if qty > 0.0 and _check_min_qty(symbol, qty):
                 target = price * (1 + SELL_TARGET)
                 positions.append({
                     "qty":         qty,
@@ -189,11 +180,11 @@ def update_coin(symbol, df):
                     "cost":        buy_amount,
                     "target":      target,
                     "level":       "init",
-                "entry_time":  ts,
-            })
-            deployed += buy_amount
-            cash     -= buy_amount
-            notify_buy(symbol, price, buy_amount, target, "init")
+                    "entry_time":  ts,
+                })
+                deployed += buy_amount
+                cash     -= buy_amount
+                notify_buy(symbol, price, buy_amount, target, "init")
         state.update({"reference_price": ref_price, "positions": positions,
                       "deployed": deployed, "coin_cash": cash,
                       "realized_pnl": realized, "levels_bought": levels_bought,
@@ -259,42 +250,43 @@ def update_coin(symbol, df):
                 buy_amount = alloc_pct * cash
                 buy_amount = min(buy_amount, COIN_CAPITAL - deployed, cash * 0.99)
                 if buy_amount >= 1.0:
-                    qty    = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
-                    if qty == 0.0:
-                        continue
-                    target = price * (1 + SELL_TARGET)
-                    positions.append({
-                        "qty":         qty,
-                        "entry_price": price,
-                        "cost":        buy_amount,
-                        "target":      target,
-                        "level":       f"-{int(threshold*100)}%",
-                        "entry_time":  ts,
-                    })
-                    deployed       += buy_amount
-                    cash           -= buy_amount
-                    levels_bought.append(level_key)
-                    notify_buy(symbol, price, buy_amount, target, f"-{int(threshold*100)}%")
+                    qty = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
+                    if qty > 0.0 and _check_min_qty(symbol, qty):
+                        target = price * (1 + SELL_TARGET)
+                        positions.append({
+                            "qty":         qty,
+                            "entry_price": price,
+                            "cost":        buy_amount,
+                            "target":      target,
+                            "level":       f"-{int(threshold*100)}%",
+                            "entry_time":  ts,
+                        })
+                        deployed      += buy_amount
+                        cash          -= buy_amount
+                        levels_bought.append(level_key)
+                        notify_buy(symbol, price, buy_amount, target,
+                                   f"-{int(threshold*100)}%")
 
         # Beyond -16%: deploy remaining cash
         if drop_pct >= 0.16 and "beyond" not in levels_bought:
             remaining_cap = COIN_CAPITAL - deployed
             buy_amount    = min(remaining_cap, cash * 0.99)
             if buy_amount >= 1.0:
-                qty    = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
-                target = price * (1 + SELL_TARGET)
-                positions.append({
-                    "qty":         qty,
-                    "entry_price": price,
-                    "cost":        buy_amount,
-                    "target":      target,
-                    "level":       "beyond",
-                    "entry_time":  ts,
-                })
-                deployed       += buy_amount
-                cash           -= buy_amount
-                levels_bought.append("beyond")
-                notify_buy(symbol, price, buy_amount, target, "beyond")
+                qty = _round_qty(symbol, buy_amount * (1 - COMMISSION) / price)
+                if qty > 0.0 and _check_min_qty(symbol, qty):
+                    target = price * (1 + SELL_TARGET)
+                    positions.append({
+                        "qty":         qty,
+                        "entry_price": price,
+                        "cost":        buy_amount,
+                        "target":      target,
+                        "level":       "beyond",
+                        "entry_time":  ts,
+                    })
+                    deployed      += buy_amount
+                    cash          -= buy_amount
+                    levels_bought.append("beyond")
+                    notify_buy(symbol, price, buy_amount, target, "beyond")
 
     # ── Save ──────────────────────────────────────────────────────
     state.update({
@@ -321,7 +313,6 @@ def run_grid_bot(coins_data):
 
     run_pnl = run_trades = total_open = 0
     total_cash = total_unrealized = total_equity = 0.0
-
     coin_lines = []
 
     for symbol in GRID_COINS:
@@ -342,11 +333,12 @@ def run_grid_bot(coins_data):
         ref       = state["reference_price"] or price
         drop_now  = (ref - price) / ref * 100 if ref > 0 else 0
         unreal    = sum(pos["qty"] * price - pos["cost"] for pos in positions)
-        eq        = state["coin_cash"] + sum(pos["qty"] * price for pos in positions)
 
-        total_cash      += state["coin_cash"]
+        total_cash       += state["coin_cash"]
         total_unrealized += unreal
-        total_equity    += eq
+        total_equity     += state["coin_cash"] + sum(
+            pos["qty"] * price for pos in positions
+        )
 
         status = "WAIT" if state.get("waiting_reset") else f"drop={drop_now:+.1f}%"
         coin_lines.append(
@@ -360,7 +352,7 @@ def run_grid_bot(coins_data):
 
     # ── Compact log output ────────────────────────────────────────
     print("=" * 65)
-    print(f"  GRID BOT  |  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  |  {TRADING_MODE.upper()}")
+    print(f"  GRID BOT  |  {_ist_now()}  |  {TRADING_MODE.upper()}")
     print(f"  equity=${total_equity:.2f}  cash=${total_cash:.2f}  "
           f"unreal={total_unrealized:+.2f}  realized={realized_pnl:+.2f}  "
           f"trades={total_trades}  open={total_open}")
