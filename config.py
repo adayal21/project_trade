@@ -147,7 +147,7 @@ CANDLES_URL   = "https://public.coindcx.com/market_data/candles"
 TIMEFRAME     = "4h"
 CANDLES_LIMIT = 500
 INTERVAL_MS   = 14_400_000
-WARMUP_BARS   = 600
+WARMUP_BARS   = 400
 
 # ---------------------------------------------------------------------------
 # Telegram notifications (optional)

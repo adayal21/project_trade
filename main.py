@@ -146,17 +146,34 @@ coins_data_1h = {}   # 1H candles — HMA exit for ALL coins
 
 fetch_errors = []
 for symbol in COINS:
+    # --- 4H candles ---
     df4h = fetch_candles(symbol)
-    print(f"[{symbol}] fetched {len(df4h)} bars, last={df4h.index[-1]}")
     if df4h.empty or len(df4h) < 100:
+        print(f"  [{symbol}] 4H fetch failed or insufficient bars ({len(df4h)}), skipping")
         fetch_errors.append(symbol)
         continue
+
+    age_4h = (datetime.now(timezone.utc) - df4h.index[-1]).total_seconds() / 3600
+    print(f"[{symbol}] fetched {len(df4h)} bars, last={df4h.index[-1]} ({age_4h:.1f}h ago)")
+    if age_4h > 5:
+        print(f"  [{symbol}] STALE 4H DATA — {age_4h:.1f}h old, skipping")
+        fetch_errors.append(symbol)
+        continue
+
     coins_data[symbol] = df4h
 
-    # 1H candles for exit — ALL coins use 1H exit
+    # --- 1H candles ---
     df1h = fetch_candles_1h(symbol)
-    if not df1h.empty and len(df1h) >= 80:
-        coins_data_1h[symbol] = df1h
+    if df1h.empty or len(df1h) < 80:
+        print(f"  [{symbol}] 1H fetch failed or insufficient bars ({len(df1h)}), skipping 1H")
+        continue
+
+    age_1h = (datetime.now(timezone.utc) - df1h.index[-1]).total_seconds() / 3600
+    if age_1h > 2:
+        print(f"  [{symbol}] STALE 1H DATA — {age_1h:.1f}h old, skipping 1H")
+        continue
+
+    coins_data_1h[symbol] = df1h
 
 if fetch_errors:
     print(f"  FETCH ERRORS: {', '.join(fetch_errors)}")
