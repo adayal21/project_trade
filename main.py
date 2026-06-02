@@ -147,6 +147,7 @@ coins_data_1h = {}   # 1H candles — HMA exit for ALL coins
 fetch_errors = []
 for symbol in COINS:
     df4h = fetch_candles(symbol)
+    print(f"[{symbol}] fetched {len(df4h)} bars, last={df4h.index[-1]}")
     if df4h.empty or len(df4h) < 100:
         fetch_errors.append(symbol)
         continue

@@ -262,6 +262,7 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame,
     else:
         entry_signal = bool(row["entry_long"] == 1)
 
+    print(f"  [{symbol}] bar_time={row.name} close={float(row['Close']):.6f} fast={float(row['hma_fast']):.6f} slow={float(row['hma_slow']):.6f}")
     return {
         "strategy":     "hma",
         "entry_signal": entry_signal,
