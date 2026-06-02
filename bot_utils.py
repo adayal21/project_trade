@@ -253,10 +253,9 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame,
     if gap_filter is not None:
         hma_gap_frac    = hma_gap / 100
         mid_trend_entry = (
-            float(row["hma_fast"]) > float(row["hma_slow"]) and
-            0 < hma_gap_frac <= gap_filter and
-            bool(row["entry_long"] == 1 or
-                 (float(row["rsi"]) > RSI_THRESHOLD_OVERRIDE.get(symbol, RSI_THRESHOLD)))
+            float(row["hma_fast"]) > float(row["hma_slow"])
+            and 0 < hma_gap_frac <= 0.03
+            and 52 < float(row["rsi"]) < 60
         )
         entry_signal = bool(row["entry_long"] == 1) or mid_trend_entry
     else:
