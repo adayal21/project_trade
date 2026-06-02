@@ -69,10 +69,7 @@ USE_DAILY_LINREG = False
 
 # Per-coin RSI overrides — based on backtest analysis
 # BTC and ETH perform better at RSI 50 (+27.9% and +35.6% improvement)
-RSI_THRESHOLD_OVERRIDE = {
-    "BTC/USDT": 50,
-    "ETH/USDT": 50,
-}
+RSI_THRESHOLD_OVERRIDE = {}
 
 # Exit frequency — ALL coins use 1H exit (backtest validated: best Sharpe 0.98,
 # lowest drawdown -24.7%, best profit factor 1.68 vs 4H+4H combo)
@@ -97,12 +94,7 @@ HMA_EXIT_FREQUENCY = {
 # 0.02 = allow mid-trend entry when gap ≤ 2% (not too extended)
 # Coins that benefit from mid-trend entry: DOGE +140%, ETH +14%, XRP +27%, BNB +34%
 # Coins that perform better with strict crossover: BTC, ZEC, ADA, SOL, AVAX, LINK, JASMY, POL
-HMA_GAP_FILTER = {
-    "DOGE/USDT": 0.02,   # +366% → +506% with gap ≤2%
-    "ETH/USDT":  0.02,   # +49%  → +63%  with gap ≤2%
-    "XRP/USDT":  0.02,   # +147% → +174% with gap ≤2%
-    "BNB/USDT":  0.02,   # +23%  → +31%  with gap ≤2%
-}
+HMA_GAP_FILTER = {}
 
 # Per-coin Ichimoku Chikou condition override — based on backtest analysis
 # True  = require chikou (current strict behavior)

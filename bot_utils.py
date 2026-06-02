@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 import requests
+import pandas_ta as ta
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
@@ -160,13 +161,16 @@ def compute_hma_exit_1h(symbol: str, df: pd.DataFrame) -> dict | None:
     try:
         close = df["Close"].astype(float)
 
-        def _wma(s, p):
-            return s.ewm(span=p, adjust=False).mean()
-
         def _hma(s, p):
             half  = max(int(p / 2), 1)
             sqrtp = max(int(np.sqrt(p)), 1)
-            return _wma(2 * _wma(s, half) - _wma(s, p), sqrtp)
+
+            wma_half = ta.wma(s, length=half)
+            wma_full = ta.wma(s, length=p)
+
+            raw = 2 * wma_half - wma_full
+
+            return ta.wma(raw, length=sqrtp)
 
         hma_fast = _hma(close, HMA_FAST)
         hma_slow = _hma(close, HMA_SLOW)

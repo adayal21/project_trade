@@ -340,6 +340,31 @@ else:
             print(f"  {sym} [{strat.upper()}]  BLOCKED — insufficient cash")
             continue
 
+        # ==================================================
+        # NEW 1H CONFIRMATION FILTER
+        # ==================================================
+        if strat == "hma":
+
+            df1h = coins_data_1h.get(sym)
+
+            if df1h is not None:
+
+                sig_1h = compute_hma_exit_1h(sym, df1h)
+
+                if sig_1h:
+
+                    if sig_1h["hma_fast"] <= sig_1h["hma_slow"]:
+
+                        print(
+                            f"  {sym} [HMA] BLOCKED "
+                            f"- 1H bearish "
+                            f"({sig_1h['hma_fast']:.4f} "
+                            f"< "
+                            f"{sig_1h['hma_slow']:.4f})"
+                        )
+
+                        continue
+
         latest_price = sig["close"]
         quantity     = (allocation * POSITION_SIZE) / latest_price
         dbl_str      = " ★DOUBLE" if sym in double_confirmed else ""
