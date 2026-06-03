@@ -172,20 +172,50 @@ print(f"  {'4H CLOSE — entries + exits' if _is_4h_close else 'Hourly — exits
 print("=" * 55)
 
 # ---------------------------------------------------------------------------
-# Fetch live coin universe from CoinSwitch
+# Load coin universe from daily watchlist (fast) — falls back to live API
 # ---------------------------------------------------------------------------
-print("  Fetching live INR pair universe from CoinSwitch...")
-UNIVERSE = fetch_all_inr_pairs()
+_WATCHLIST_FILE = f"{DATA_DIR}/watchlist.json"
+_watchlist_age_h = None
 
-# Also include any coins with open positions that may not be in live universe
-# (handles delisted coins — we still need to exit them)
+UNIVERSE = []
+
+# Try loading the daily watchlist first
+try:
+    import json as _json
+    with open(_WATCHLIST_FILE) as _f:
+        _wl = _json.load(_f)
+    _updated = datetime.fromisoformat(_wl["updated_at"])
+    _watchlist_age_h = (datetime.now(timezone.utc) - _updated).total_seconds() / 3600
+    if _watchlist_age_h <= 26:    # accept watchlist up to 26h old (covers daily refresh)
+        UNIVERSE = _wl["coins"]
+        print(f"  Watchlist loaded: {len(UNIVERSE)} coins (updated {_watchlist_age_h:.1f}h ago)")
+    else:
+        print(f"  Watchlist too old ({_watchlist_age_h:.1f}h) — falling back to live API fetch")
+except Exception as _e:
+    print(f"  No watchlist found ({_e}) — falling back to live API fetch")
+
+# Fallback: fetch live from CoinSwitch if watchlist missing or too old
+if not UNIVERSE:
+    print("  Fetching live INR pair universe from CoinSwitch...")
+    UNIVERSE = fetch_all_inr_pairs()
+    print(f"  Live universe: {len(UNIVERSE)} INR pairs")
+
+# Always include coins with open positions — even if dropped from watchlist
+# (delisted coins, stale coins we're still holding — must be able to exit)
 position_coins = get_coins_with_open_positions()
-extra = [c for c in position_coins if c not in UNIVERSE]
-if extra:
-    print(f"  Adding {len(extra)} coin(s) with open positions not in live universe: {extra}")
-    UNIVERSE = extra + UNIVERSE   # prepend so they're checked first in exit pass
+extra_pos = [c for c in position_coins if c not in UNIVERSE]
+if extra_pos:
+    print(f"  + {len(extra_pos)} coin(s) with open positions added: {extra_pos}")
+    UNIVERSE = extra_pos + UNIVERSE
 
-print(f"  Universe: {len(UNIVERSE)} INR pairs")
+# Always include TG-tracked coins (we sent a BUY — must be able to send SELL)
+_tg_tracked_preview = _load_tg_tracked()
+extra_tg = [c for c, _ in _tg_tracked_preview if c not in UNIVERSE]
+if extra_tg:
+    print(f"  + {len(extra_tg)} TG-tracked coin(s) added: {extra_tg}")
+    UNIVERSE = extra_tg + UNIVERSE
+
+print(f"  Universe: {len(UNIVERSE)} coins for this run")
 
 # Load Telegram tracking state (persists across runs)
 tg_tracked = _load_tg_tracked()
@@ -219,48 +249,30 @@ print()
 coins_data    = {}   # 4H candles — entries + Ichimoku signals
 coins_data_1h = {}   # 1H candles — HMA exit for ALL coins
 
-fetch_errors  = []
-skipped_stale = []
-skipped_bars  = []
-skipped_vol   = []
+fetch_errors = []
 total = len(UNIVERSE)
 
 for i, symbol in enumerate(UNIVERSE, 1):
     print(f"  [{i}/{total}] {symbol} ...", end=" ", flush=True)
 
-    # ── Step 1: Fetch ──────────────────────────────────────────────────────
+    # Fetch 4H candles
     df4h = fetch_candles(symbol)
-    if df4h.empty:
-        print("fetch failed — skip")
+    if df4h.empty or len(df4h) < 100:
+        print(f"fetch failed/insufficient — skip")
         fetch_errors.append(symbol)
         continue
 
-    # ── Step 2: Staleness — is the data fresh? ─────────────────────────────
+    # Staleness guard — still check even on watchlist coins
+    # (a coin can go stale between daily watchlist refresh and hourly run)
     age_4h = (datetime.now(timezone.utc) - df4h.index[-1]).total_seconds() / 3600
     if age_4h > 8:
-        print(f"STALE ({age_4h:.1f}h old) — skip")
-        skipped_stale.append(symbol)
+        print(f"STALE ({age_4h:.1f}h) — skip")
+        fetch_errors.append(symbol)
         continue
 
-    # ── Step 3: Bar count — enough history for indicators? ─────────────────
-    if len(df4h) < 100:
-        print(f"insufficient bars ({len(df4h)}) — skip")
-        skipped_bars.append(symbol)
-        continue
-
-    # ── Step 4: Volume sanity — is the coin actually trading? ──────────────
-    # Reject if more than 30% of the last 20 candles have zero volume
-    last20    = df4h["Volume"].iloc[-20:]
-    zero_frac = (last20 == 0).sum() / len(last20)
-    if zero_frac > 0.30:
-        print(f"thin volume ({zero_frac:.0%} zero-vol candles) — skip")
-        skipped_vol.append(symbol)
-        continue
-
-    # ── Passed all pre-filters — accept for signal computation ────────────
     coins_data[symbol] = df4h
 
-    # --- 1H candles (staleness checked independently) ---
+    # Fetch 1H candles for exit detection
     df1h = fetch_candles_1h(symbol)
     ok_1h = ""
     if not df1h.empty and len(df1h) >= 80:
@@ -272,19 +284,10 @@ for i, symbol in enumerate(UNIVERSE, 1):
     print(f"✓ {ok_1h}")
 
 print()
-# Pre-filter summary
-print(f"  Pre-filter results:")
-print(f"    Passed  : {len(coins_data)} coins → signal computation")
-if skipped_stale: print(f"    Stale   : {len(skipped_stale)} — {', '.join(skipped_stale)}")
-if skipped_bars:  print(f"    Thin history: {len(skipped_bars)} — {', '.join(skipped_bars)}")
-if skipped_vol:   print(f"    Low volume: {len(skipped_vol)} — {', '.join(skipped_vol)}")
-if fetch_errors:  print(f"    Fetch failed: {len(fetch_errors)} — {', '.join(fetch_errors)}")
-print()
-
-# Shrink UNIVERSE to only coins we have candle data for
-# (keeps all signal + exit loops clean — no dead iterations)
+if fetch_errors:
+    print(f"  Skipped {len(fetch_errors)} coin(s) this run (stale/fetch-fail): {', '.join(fetch_errors)}")
 SCANNED = list(coins_data.keys())
-print(f"  Scanned: {len(SCANNED)} / {len(UNIVERSE)} INR pairs passed pre-filters")
+print(f"  Fetched: {len(SCANNED)} / {len(UNIVERSE)} coins with valid candles")
 print()
 
 

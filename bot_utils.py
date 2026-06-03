@@ -269,6 +269,11 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame,
     """
     HMA(16/64) + RSI(14) + LinReg(50) strategy.
     Uses utils.prepare_dataset() — the validated indicator library.
+
+    Slope filter: HMA_slow must be rising over the last 3 bars at entry.
+    Prevents entering on downtrend bounces where fast briefly crosses above
+    a still-falling slow line. Fires at the same crossover bar — no delay —
+    just skips crossovers where the slow line is still pointing down.
     """
     if len(df) < min_bars:
         return None
@@ -289,15 +294,20 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame,
             print(f"  [{symbol}][HMA] error: {e}")
         return None
 
-    if prepared.empty or len(prepared) < 2:
+    if prepared.empty or len(prepared) < 5:
         return None
 
-    row     = prepared.iloc[-1]
+    row      = prepared.iloc[-1]
+    row_3ago = prepared.iloc[-4]   # 3 bars back for slope check
+
     hma_gap = (
         (float(row["hma_fast"]) - float(row["hma_slow"])) /
         float(row["hma_slow"]) * 100
         if float(row["hma_slow"]) != 0 else 0.0
     )
+
+    # Slope filter — HMA slow must be rising vs 3 bars ago
+    hma_slow_rising = float(row["hma_slow"]) > float(row_3ago["hma_slow"])
 
     gap_filter = HMA_GAP_FILTER.get(symbol)
     if gap_filter is not None:
@@ -306,23 +316,25 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame,
             float(row["hma_fast"]) > float(row["hma_slow"])
             and 0 < hma_gap_frac <= 0.03
             and 52 < float(row["rsi"]) < 60
+            and hma_slow_rising
         )
-        entry_signal = bool(row["entry_long"] == 1) or mid_trend_entry
+        entry_signal = (bool(row["entry_long"] == 1) and hma_slow_rising) or mid_trend_entry
     else:
-        entry_signal = bool(row["entry_long"] == 1)
+        entry_signal = bool(row["entry_long"] == 1) and hma_slow_rising
 
     return {
-        "strategy":     "hma",
-        "entry_signal": entry_signal,
-        "exit_signal":  bool(row["exit_long"] == 1),
-        "close":        float(row["Close"]),
-        "hma_fast":     float(row["hma_fast"]),
-        "hma_slow":     float(row["hma_slow"]),
-        "hma_gap_pct":  round(hma_gap, 2),
-        "rsi":          float(row["rsi"]),
-        "linreg":       float(row["linreg_4h"]),
-        "bars":         len(prepared),
-        "bar_time":     str(row.name),
+        "strategy":        "hma",
+        "entry_signal":    entry_signal,
+        "exit_signal":     bool(row["exit_long"] == 1),
+        "close":           float(row["Close"]),
+        "hma_fast":        float(row["hma_fast"]),
+        "hma_slow":        float(row["hma_slow"]),
+        "hma_gap_pct":     round(hma_gap, 2),
+        "hma_slow_rising": hma_slow_rising,
+        "rsi":             float(row["rsi"]),
+        "linreg":          float(row["linreg_4h"]),
+        "bars":            len(prepared),
+        "bar_time":        str(row.name),
     }
 
 

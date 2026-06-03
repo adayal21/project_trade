@@ -36,37 +36,30 @@ else:
 DATA_DIR = "data"
 
 # ---------------------------------------------------------------------------
-# Coin universe — all backtested INR pairs on CoinSwitch
+# Coin universe — fallback list used only if CoinSwitch API is unreachable.
+# At runtime, all active INR pairs are fetched live from the API instead.
+#
+# This list = 17 coins that were BOTH HMA-positive AND Ichimoku-positive
+# on the INR backtest (333 days, 4H candles). Used as emergency fallback.
 # ---------------------------------------------------------------------------
 COINS = [
-    # ── Core — backtested, proven positive returns ──
-    "DOGE/INR",    # Combined +33.4% | HMA  +6.9% | ICHI +26.5%
-    "ADA/INR",     # Combined +36.7% | HMA +20.3% | ICHI +16.4% | BEST balanced
-    "XRP/INR",     # Combined +22.2% | HMA +17.1% | ICHI  +5.1%
-    "ZEC/INR",     # Combined +18.3% | HMA +15.9% | ICHI  +2.4%
-    "SOL/INR",     # Combined  +9.9% | HMA  -1.7% | ICHI +11.6%
-    "SHIB/INR",    # Combined +10.9% | HMA  +6.5% | ICHI  +4.4%
-    "BTC/INR",     # Combined  +5.6% | HMA  +5.4% | ICHI  +0.2%
-    "LINK/INR",    # Combined  +3.7% | HMA  +4.1% | ICHI  -0.4%
-    "INJ/INR",     # Combined  +2.7% | HMA  -1.8% | ICHI  +4.5%
-    "TRX/INR",     # Combined  +2.5% | HMA  +0.3% | ICHI  +2.2%
-
-    # ── Tier 1 additions — established coins, confirmed on CoinSwitch ──
-    "DOT/INR",     # Polkadot — strong ecosystem, good HMA trends
-    "ATOM/INR",    # Cosmos — consistent trending behaviour
-    "NEAR/INR",    # NEAR Protocol — strong momentum coin
-    "ARB/INR",     # Arbitrum — leading L2, active trading
-    "UNI/INR",     # Uniswap — DeFi leader, clean trends
-    "RENDER/INR",  # Render — AI/GPU narrative, strong uptrends
-    "TAO/INR",     # Bittensor — AI narrative, high momentum
-    "SUI/INR",     # Sui — fresh L1, active on CoinSwitch
-    "LDO/INR",     # Lido — liquid staking, decent trend signals
-
-    # ── Tier 2 additions — newer but active ──
-    "APT/INR",     # Aptos — L1, decent liquidity
-    "FIL/INR",     # Filecoin — storage narrative
-    "JUP/INR",     # Jupiter — Solana DEX aggregator
-    "VIRTUAL/INR", # Virtuals Protocol — AI agents narrative
+    "ICP/INR",       # HMA +113.5% | ICHI  +92.9% | Combined +206.4%
+    "VVV/INR",       # HMA +157.1% | ICHI   +4.0% | Combined +161.1%
+    "ORDI/INR",      # HMA  +41.5% | ICHI  +80.1% | Combined +121.6%
+    "VIRTUAL/INR",   # HMA  +55.8% | ICHI  +57.5% | Combined +113.3%
+    "TON/INR",       # HMA  +57.9% | ICHI  +42.2% | Combined +100.1%
+    "ZEC/INR",       # HMA  +20.9% | ICHI  +72.0% | Combined  +92.9%
+    "EPIC/INR",      # HMA  +37.1% | ICHI  +43.1% | Combined  +80.2%
+    "SAHARA/INR",    # HMA  +15.0% | ICHI  +65.2% | Combined  +80.2%
+    "IP/INR",        # HMA  +15.7% | ICHI  +55.4% | Combined  +71.1%
+    "NEAR/INR",      # HMA  +17.3% | ICHI  +30.7% | Combined  +48.0%
+    "GIGGLE/INR",    # HMA   +9.5% | ICHI  +36.9% | Combined  +46.4%
+    "DASH/INR",      # HMA  +10.5% | ICHI  +31.1% | Combined  +41.6%
+    "SPX/INR",       # HMA  +30.6% | ICHI   +1.6% | Combined  +32.2%
+    "AIXBT/INR",     # HMA  +26.1% | ICHI   +3.5% | Combined  +29.6%
+    "PIXEL/INR",     # HMA   +5.9% | ICHI  +19.5% | Combined  +25.4%
+    "PUMP/INR",      # HMA  +14.3% | ICHI   +5.0% | Combined  +19.3%
+    "STO/INR",       # HMA   +0.2% | ICHI +284.5% | Combined +284.7%
 ]
 
 STRATEGIES = ["hma", "ichimoku"]
