@@ -58,7 +58,6 @@ def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
     now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = now_ms - (warmup_bars * interval_ms)
     all_rows = []
-    retries  = 0
     cur      = start_ms
 
     while cur < now_ms:
@@ -68,35 +67,45 @@ def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
             "startTime": cur, "endTime": end_ms,
             "limit": CANDLES_LIMIT,
         }
-        try:
-            resp = requests.get(CANDLES_URL, params=params, timeout=20)
-        except requests.exceptions.RequestException:
-            retries += 1
-            if retries > 3:
-                return pd.DataFrame()
-            time.sleep(3)
-            continue
 
-        if resp.status_code == 429:
-            time.sleep(15)
-            continue
-        if resp.status_code != 200:
-            retries += 1
-            if retries > 3:
-                return pd.DataFrame()
-            time.sleep(3)
-            continue
+        success = False
+        for attempt in range(4):          # 4 attempts per page
+            wait = [0, 5, 15, 30][attempt]  # backoff: 0s, 5s, 15s, 30s
+            if wait:
+                time.sleep(wait)
+            try:
+                resp = requests.get(CANDLES_URL, params=params, timeout=20)
+            except requests.exceptions.RequestException as e:
+                print(f"  [{symbol}] fetch exception (attempt {attempt+1}): {e}")
+                continue
 
-        retries = 0
-        try:
-            candles = resp.json()
-        except Exception:
+            if resp.status_code == 429:
+                print(f"  [{symbol}] rate limited — sleeping 30s")
+                time.sleep(30)
+                continue
+            if resp.status_code != 200:
+                print(f"  [{symbol}] HTTP {resp.status_code} (attempt {attempt+1}) — {resp.text[:80]}")
+                continue
+
+            try:
+                candles = resp.json()
+            except Exception as e:
+                print(f"  [{symbol}] JSON parse error: {e}")
+                continue
+
+            if isinstance(candles, list) and candles:
+                all_rows.extend(candles)
+            success = True
+            break
+
+        if not success:
+            print(f"  [{symbol}] gave up after 4 attempts — skipping coin")
             return pd.DataFrame()
 
-        if isinstance(candles, list) and candles:
-            all_rows.extend(candles)
         cur = end_ms + interval_ms
-        time.sleep(0.3)
+        time.sleep(0.5)   # bumped from 0.3 → 0.5 between pages
+
+    # ... rest unchanged
 
     if not all_rows:
         return pd.DataFrame()

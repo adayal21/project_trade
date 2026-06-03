@@ -40,7 +40,7 @@ DATA_DIR = "data"
 COINS = [
     "DOGE/USDT",   # Combined +271% | HMA +133% | ICHI +138% | BEST
     "ADA/USDT",    # Combined +199% | HMA +152% | ICHI  +47%
-    "POL/USDT",    # Combined +166% | HMA  +86% | ICHI  +80%
+    "MATIC/USDT",    # Combined +166% | HMA  +86% | ICHI  +80%
     "SOL/USDT",    # Combined +160% | HMA  +74% | ICHI  +86%
     "BNB/USDT",    # Combined  +89% | HMA  +21% | ICHI  +68%
     "XRP/USDT",    # Combined  +87% | HMA  +91% | ICHI   -4%
