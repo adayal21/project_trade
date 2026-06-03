@@ -133,7 +133,7 @@ run_events = []
 trades_run = 0
 
 open_now = count_open()
-print(f"  Cash: ${cash:,.2f}  |  Open: {open_now}/{MAX_OPEN_POSITIONS}  |  Trades: {total_trades}  |  PnL: ${realized_pnl:+,.2f}")
+print(f"  Cash: ₹{cash:,.2f}  |  Open: {open_now}/{MAX_OPEN_POSITIONS}  |  Trades: {total_trades}  |  PnL: ₹{realized_pnl:+,.2f}")
 print()
 
 
@@ -268,7 +268,7 @@ for symbol in COINS:
         net_pnl = pnl - comm if TRADING_MODE == "paper" else pnl
 
         print(f"  {symbol:<14} [{strategy.upper():<8}]  EXIT [{exit_reason}]  "
-              f"{entry_price:.4f}→{latest_price:.4f}  {move_pct:+.2%}  PnL=${net_pnl:+.2f}")
+              f"{entry_price:.4f}→{latest_price:.4f}  {move_pct:+.2%}  PnL=₹{net_pnl:+.2f}")
 
         realized_pnl += net_pnl
         total_trades += 1
@@ -387,7 +387,7 @@ else:
         dbl_str      = " ★DOUBLE" if sym in double_confirmed else ""
 
         print(f"  {sym:<14} [{strat.upper():<8}]  ENTRY{dbl_str}  "
-              f"@ ${latest_price:.4f}  qty={quantity:.6f}  alloc=${allocation:.2f}")
+              f"@ ₹{latest_price:.4f}  qty={quantity:.6f}  alloc=₹{allocation:.2f}")
 
         if TRADING_MODE == "live":
             from exchange import place_market_order, get_order_status
@@ -449,8 +449,8 @@ notify_run_summary(equity_final, cash, open_count, realized_pnl)
 
 ret_pct = (equity_final / INITIAL_CAPITAL - 1) * 100
 print("=" * 55)
-print(f"  Cash: ${cash:,.2f}  Unreal: ${unrealized:+,.2f}  Equity: ${equity_final:,.2f}")
-print(f"  Return: {ret_pct:+.2f}%  |  PnL: ${realized_pnl:+,.2f}  |  Open: {open_count}/{MAX_OPEN_POSITIONS}")
+print(f"  Cash: ₹{cash:,.2f}  Unreal: ₹{unrealized:+,.2f}  Equity: ₹{equity_final:,.2f}")
+print(f"  Return: {ret_pct:+.2f}%  |  PnL: ₹{realized_pnl:+,.2f}  |  Open: {open_count}/{MAX_OPEN_POSITIONS}")
 
 # Open positions summary
 if open_count > 0:
@@ -474,8 +474,8 @@ if open_count > 0:
                 gap_str = f"  gap={gap:+.2f}%({label})"
             elif sig and st == "ichimoku":
                 gap_str = f"  cloud={sig.get('cloud_gap_pct',0):+.2f}%"
-            print(f"    {s} [{st.upper():<8}]  entry=${ep:.4f}  now=${cp:.4f}  "
-                  f"{move:+.2%}  PnL=${pnl:+.2f}  bars={bars}{gap_str}")
+            print(f"    {s} [{st.upper():<8}]  entry=₹{ep:.4f}  now=₹{cp:.4f}  "
+                  f"{move:+.2%}  PnL=₹{pnl:+.2f}  bars={bars}{gap_str}")
 
 print()
 print(f"  Done. [{'4H close' if _is_4h_close else 'hourly exit'}]  Next: :05 past next hour")
