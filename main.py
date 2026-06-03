@@ -27,6 +27,7 @@ from bot_utils import (
     compute_hma_exit_1h,
     compute_ichimoku_signals,
     notify_entry, notify_exit, notify_run_summary,
+    notify_signal_alert,
 )
 from portfolio import initialize_portfolio, log_portfolio
 
@@ -292,6 +293,18 @@ for symbol in COINS:
         notify_exit(symbol, strategy, entry_price, latest_price,
                     quantity, net_pnl, exit_reason)
 
+        # Manual trading alert — SELL signal
+        sig_for_alert = all_signals.get((symbol, strategy), {})
+        notify_signal_alert(
+            symbol   = symbol,
+            strategy = strategy,
+            action   = "SELL",
+            price    = latest_price,
+            rsi      = sig_for_alert.get("rsi"),
+            gap_pct  = sig_for_alert.get("hma_gap_pct") if strategy == "hma" else None,
+            cloud_gap_pct = sig_for_alert.get("cloud_gap_pct") if strategy == "ichimoku" else None,
+        )
+
         if TRADING_MODE == "live":
             from exchange import place_market_order
             place_market_order(symbol, "sell", quantity)
@@ -424,6 +437,17 @@ else:
         run_events.append(f"{sym}[{strat[:4].upper()}] ENTRY @ {latest_price:.4f}")
 
         notify_entry(sym, strat, latest_price, quantity, allocation, sig)
+
+        # Manual trading alert — BUY signal
+        notify_signal_alert(
+            symbol   = sym,
+            strategy = strat,
+            action   = "BUY",
+            price    = latest_price,
+            rsi      = sig.get("rsi"),
+            gap_pct  = sig.get("hma_gap_pct") if strat == "hma" else None,
+            cloud_gap_pct = sig.get("cloud_gap_pct") if strat == "ichimoku" else None,
+        )
 
 print()
 

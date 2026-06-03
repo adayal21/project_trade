@@ -392,8 +392,29 @@ def _telegram(message: str) -> None:
         pass
 
 
-def notify_entry(symbol: str, strategy: str, price: float,
-                 qty: float, allocation: float, sig: dict) -> None:
+def notify_signal_alert(symbol: str, strategy: str, action: str,
+                        price: float, rsi: float = None,
+                        gap_pct: float = None, cloud_gap_pct: float = None) -> None:
+    """
+    Manual trading alert — fired on real buy/sell signals.
+    action: 'BUY' or 'SELL'
+    Sent independently of paper trading positions.
+    """
+    emoji   = "🟢" if action == "BUY" else "🔴"
+    strat   = strategy.upper()
+
+    lines = [
+        f"{emoji} <b>{action} — {symbol}</b>  [{strat}]",
+        f"Price : ₹{price:.4f}",
+    ]
+    if rsi is not None:
+        lines.append(f"RSI   : {rsi:.1f}")
+    if gap_pct is not None:
+        lines.append(f"Gap%  : {gap_pct:+.2f}%")
+    if cloud_gap_pct is not None:
+        lines.append(f"Cloud : {cloud_gap_pct:+.2f}%")
+
+    _telegram("\n".join(lines))
     if strategy == "ichimoku":
         detail = (f"Cloud gap: {sig.get('cloud_gap_pct',0):+.2f}%\n"
                   f"Kijun   : {sig.get('kijun',0):.4f} (stop)")
