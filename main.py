@@ -219,27 +219,48 @@ print()
 coins_data    = {}   # 4H candles — entries + Ichimoku signals
 coins_data_1h = {}   # 1H candles — HMA exit for ALL coins
 
-fetch_errors = []
+fetch_errors  = []
+skipped_stale = []
+skipped_bars  = []
+skipped_vol   = []
 total = len(UNIVERSE)
+
 for i, symbol in enumerate(UNIVERSE, 1):
     print(f"  [{i}/{total}] {symbol} ...", end=" ", flush=True)
 
-    # --- 4H candles ---
+    # ── Step 1: Fetch ──────────────────────────────────────────────────────
     df4h = fetch_candles(symbol)
-    if df4h.empty or len(df4h) < 100:
-        print(f"4H insufficient ({len(df4h)} bars) — skip")
+    if df4h.empty:
+        print("fetch failed — skip")
         fetch_errors.append(symbol)
         continue
 
+    # ── Step 2: Staleness — is the data fresh? ─────────────────────────────
     age_4h = (datetime.now(timezone.utc) - df4h.index[-1]).total_seconds() / 3600
     if age_4h > 8:
-        print(f"STALE 4H ({age_4h:.1f}h old) — skip")
-        fetch_errors.append(symbol)
+        print(f"STALE ({age_4h:.1f}h old) — skip")
+        skipped_stale.append(symbol)
         continue
 
+    # ── Step 3: Bar count — enough history for indicators? ─────────────────
+    if len(df4h) < 100:
+        print(f"insufficient bars ({len(df4h)}) — skip")
+        skipped_bars.append(symbol)
+        continue
+
+    # ── Step 4: Volume sanity — is the coin actually trading? ──────────────
+    # Reject if more than 30% of the last 20 candles have zero volume
+    last20    = df4h["Volume"].iloc[-20:]
+    zero_frac = (last20 == 0).sum() / len(last20)
+    if zero_frac > 0.30:
+        print(f"thin volume ({zero_frac:.0%} zero-vol candles) — skip")
+        skipped_vol.append(symbol)
+        continue
+
+    # ── Passed all pre-filters — accept for signal computation ────────────
     coins_data[symbol] = df4h
 
-    # --- 1H candles ---
+    # --- 1H candles (staleness checked independently) ---
     df1h = fetch_candles_1h(symbol)
     ok_1h = ""
     if not df1h.empty and len(df1h) >= 80:
@@ -248,17 +269,22 @@ for i, symbol in enumerate(UNIVERSE, 1):
             coins_data_1h[symbol] = df1h
             ok_1h = "✓1H"
 
-    print(f"✓4H {ok_1h}")
+    print(f"✓ {ok_1h}")
 
 print()
-if fetch_errors:
-    print(f"  FETCH ERRORS ({len(fetch_errors)}): {', '.join(fetch_errors)}")
-    print()
+# Pre-filter summary
+print(f"  Pre-filter results:")
+print(f"    Passed  : {len(coins_data)} coins → signal computation")
+if skipped_stale: print(f"    Stale   : {len(skipped_stale)} — {', '.join(skipped_stale)}")
+if skipped_bars:  print(f"    Thin history: {len(skipped_bars)} — {', '.join(skipped_bars)}")
+if skipped_vol:   print(f"    Low volume: {len(skipped_vol)} — {', '.join(skipped_vol)}")
+if fetch_errors:  print(f"    Fetch failed: {len(fetch_errors)} — {', '.join(fetch_errors)}")
+print()
 
 # Shrink UNIVERSE to only coins we have candle data for
 # (keeps all signal + exit loops clean — no dead iterations)
 SCANNED = list(coins_data.keys())
-print(f"  Scanned: {len(SCANNED)} coins with valid 4H data")
+print(f"  Scanned: {len(SCANNED)} / {len(UNIVERSE)} INR pairs passed pre-filters")
 print()
 
 
