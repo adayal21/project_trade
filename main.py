@@ -154,9 +154,8 @@ for symbol in COINS:
         continue
 
     age_4h = (datetime.now(timezone.utc) - df4h.index[-1]).total_seconds() / 3600
-    # print(f"[{symbol}] fetched {len(df4h)} bars, last={df4h.index[-1]} ({age_4h:.1f}h ago)")
-    if age_4h > 5:
-        # print(f"  [{symbol}] STALE 4H DATA — {age_4h:.1f}h old, skipping")
+    if age_4h > 8:
+        print(f"  [{symbol}] STALE 4H DATA — {age_4h:.1f}h old, skipping")
         fetch_errors.append(symbol)
         continue
 

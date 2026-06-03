@@ -25,9 +25,9 @@ TRADING_MODE = os.environ.get("TRADING_MODE", "paper")
 # Capital
 # ---------------------------------------------------------------------------
 if TRADING_MODE == "live":
-    INITIAL_CAPITAL = float(os.environ.get("LIVE_INITIAL_CAPITAL", "10000"))
+    INITIAL_CAPITAL = float(os.environ.get("LIVE_INITIAL_CAPITAL", "850000"))
 else:
-    INITIAL_CAPITAL = 10_000.0
+    INITIAL_CAPITAL = 850_000.0   # ~₹8.5 lakh ≈ $10,000 at ~85 INR/USD
 
 # ---------------------------------------------------------------------------
 # Data directory
@@ -38,18 +38,19 @@ DATA_DIR = "data"
 # Coin universe
 # ---------------------------------------------------------------------------
 COINS = [
-    "DOGE/USDT",   # Combined +271% | HMA +133% | ICHI +138% | BEST
-    "ADA/USDT",    # Combined +199% | HMA +152% | ICHI  +47%
-    "MATIC/USDT",    # Combined +166% | HMA  +86% | ICHI  +80%
-    "SOL/USDT",    # Combined +160% | HMA  +74% | ICHI  +86%
-    "BNB/USDT",    # Combined  +89% | HMA  +21% | ICHI  +68%
-    "XRP/USDT",    # Combined  +87% | HMA  +91% | ICHI   -4%
-    "BTC/USDT",    # Combined  +82% | HMA  +65% | ICHI  +17% | RSI 50
-    "AVAX/USDT",   # Combined  +82% | HMA  +79% | ICHI   +3%
-    "ETH/USDT",    # Combined  +40% | HMA  -27% | ICHI  +67% | RSI 50
-    "LINK/USDT",   # Combined  +36% | HMA  -29% | ICHI  +65%
-    "ZEC/USDT",    # HMA Sharpe 1.42 | Best HMA Sharpe overall
-    "JASMY/USDT",  # HMA Sharpe 0.90 | 4-year consistent
+    "DOGE/INR",    # Combined +271% | HMA +133% | ICHI +138% | BEST
+    "ADA/INR",     # Combined +199% | HMA +152% | ICHI  +47%
+    "MATIC/INR",   # Combined +166% | HMA  +86% | ICHI  +80%
+    "SOL/INR",     # Combined +160% | HMA  +74% | ICHI  +86%
+    "BNB/INR",     # Combined  +89% | HMA  +21% | ICHI  +68%
+    "XRP/INR",     # Combined  +87% | HMA  +91% | ICHI   -4%
+    "BTC/INR",     # Combined  +82% | HMA  +65% | ICHI  +17% | RSI 50
+    "AVAX/INR",    # Combined  +82% | HMA  +79% | ICHI   +3%
+    "ETH/INR",     # Combined  +40% | HMA  -27% | ICHI  +67% | RSI 50
+    "LINK/INR",    # Combined  +36% | HMA  -29% | ICHI  +65%
+    "ZEC/INR",     # HMA Sharpe 1.42 | Best HMA Sharpe overall
+    "LTC/INR",     # Replaces JASMY — liquid, available on CoinDCX INR
+    "TRX/INR",     # New addition — high volume on CoinDCX INR
 ]
 
 STRATEGIES = ["hma", "ichimoku"]
@@ -75,18 +76,19 @@ RSI_THRESHOLD_OVERRIDE = {}
 # lowest drawdown -24.7%, best profit factor 1.68 vs 4H+4H combo)
 # Entry remains 4H only. Exit checked every hourly cron run via 1H candles.
 HMA_EXIT_FREQUENCY = {
-    "BTC/USDT":   "1h",
-    "ETH/USDT":   "1h",
-    "DOGE/USDT":  "1h",
-    "XRP/USDT":   "1h",
-    "SOL/USDT":   "1h",
-    "ADA/USDT":   "1h",
-    "BNB/USDT":   "1h",
-    "AVAX/USDT":  "1h",
-    "LINK/USDT":  "1h",
-    "ZEC/USDT":   "1h",
-    "JASMY/USDT": "1h",
-    "POL/USDT":   "1h",
+    "BTC/INR":   "1h",
+    "ETH/INR":   "1h",
+    "DOGE/INR":  "1h",
+    "XRP/INR":   "1h",
+    "SOL/INR":   "1h",
+    "ADA/INR":   "1h",
+    "BNB/INR":   "1h",
+    "AVAX/INR":  "1h",
+    "LINK/INR":  "1h",
+    "ZEC/INR":   "1h",
+    "LTC/INR":   "1h",
+    "MATIC/INR": "1h",
+    "TRX/INR":   "1h",
 }
 
 # Per-coin HMA gap filter for mid-trend entry — based on backtest analysis
@@ -102,18 +104,19 @@ HMA_GAP_FILTER = {}
 # Removing chikou improves avg return from +22% to +48.4% on most coins
 # ETH and BNB perform better WITH chikou — keep strict for those
 ICHI_REQUIRE_CHIKOU = {
-    "BTC/USDT":   False,  # NoCloud best but NoChikou also +8.8% better
-    "ETH/USDT":   True,   # Full is best — keep chikou
-    "DOGE/USDT":  False,  # NoCloud +106.6% better
-    "ADA/USDT":   False,  # NoChikou +18.4% better
-    "SOL/USDT":   False,  # NoChikou +133% better
-    "BNB/USDT":   True,   # Full is best — keep chikou
-    "XRP/USDT":   False,  # NoChikou +44.8% better
-    "AVAX/USDT":  False,  # NoChikou +31.2% better
-    "LINK/USDT":  False,  # NoCloud +49.6% better
-    "ZEC/USDT":   False,  # NoChikou +167.9% better
-    "JASMY/USDT": False,  # NoCloud +89.1% better
-    "POL/USDT":   False,  # NoChikou +28.1% better
+    "BTC/INR":   False,  # NoCloud best but NoChikou also +8.8% better
+    "ETH/INR":   True,   # Full is best — keep chikou
+    "DOGE/INR":  False,  # NoCloud +106.6% better
+    "ADA/INR":   False,  # NoChikou +18.4% better
+    "SOL/INR":   False,  # NoChikou +133% better
+    "BNB/INR":   True,   # Full is best — keep chikou
+    "XRP/INR":   False,  # NoChikou +44.8% better
+    "AVAX/INR":  False,  # NoChikou +31.2% better
+    "LINK/INR":  False,  # NoCloud +49.6% better
+    "ZEC/INR":   False,  # NoChikou +167.9% better
+    "LTC/INR":   False,  # Default — no backtest yet
+    "MATIC/INR": False,  # NoChikou +28.1% better (was POL)
+    "TRX/INR":   False,  # Default — no backtest yet
 }
 
 # ---------------------------------------------------------------------------

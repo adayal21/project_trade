@@ -42,7 +42,7 @@ _MIN_BARS_ICHI = ICHI_SENKOU + ICHI_KIJUN + 10
 
 def _candle_pair(symbol: str) -> str:
     base, quote = symbol.split("/")
-    return f"KC-{base}_{quote}"
+    return f"I-{base}_{quote}"
 
 def _order_symbol(symbol: str) -> str:
     return symbol.replace("/", "")
