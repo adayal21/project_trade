@@ -16,7 +16,7 @@ run_connectivity_test(coins)     → prints diagnostics, no real orders placed
 """
 
 import time
-from coindcx_auth import signed_post
+from coinswitch_auth import signed_post
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +326,7 @@ def run_connectivity_test(coins: list) -> None:
     # 1. Credentials
     print("\n[1/5] Checking credentials...")
     try:
-        from coindcx_auth import _get_credentials
+        from coinswitch_auth import _get_credentials
         key, secret = _get_credentials()
         print(f"  ✓ API key    : {key[:8]}...{key[-4:]}")
         print(f"  ✓ API secret : {'*' * 20}")

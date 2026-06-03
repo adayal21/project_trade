@@ -78,6 +78,40 @@ def log_trade(symbol, strategy, trade):
         df = pd.concat([pd.read_csv(f), df], ignore_index=True)
     df.to_csv(f, index=False)
 
+# =============================================================================
+# Telegram tracking — only alert SELL/HOLD for coins we sent a BUY for
+# =============================================================================
+
+_TG_TRACKED_FILE = f"{DATA_DIR}/tg_tracked.json"
+
+def _load_tg_tracked() -> set[tuple[str, str]]:
+    """Load set of (symbol, strategy) pairs we've sent a BUY alert for."""
+    import json
+    try:
+        with open(_TG_TRACKED_FILE) as f:
+            raw = json.load(f)          # stored as list of [symbol, strategy]
+        return {(r[0], r[1]) for r in raw}
+    except Exception:
+        return set()
+
+def _save_tg_tracked(tracked: set[tuple[str, str]]) -> None:
+    import json
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_TG_TRACKED_FILE, "w") as f:
+            json.dump(sorted(tracked), f)
+    except Exception:
+        pass
+
+def _tg_track(tracked: set, symbol: str, strategy: str) -> None:
+    tracked.add((symbol, strategy))
+    _save_tg_tracked(tracked)
+
+def _tg_untrack(tracked: set, symbol: str, strategy: str) -> None:
+    tracked.discard((symbol, strategy))
+    _save_tg_tracked(tracked)
+
+
 def get_coins_with_open_positions() -> list[str]:
     """
     Scan the data directory for any existing position files and return the
@@ -152,6 +186,10 @@ if extra:
     UNIVERSE = extra + UNIVERSE   # prepend so they're checked first in exit pass
 
 print(f"  Universe: {len(UNIVERSE)} INR pairs")
+
+# Load Telegram tracking state (persists across runs)
+tg_tracked = _load_tg_tracked()
+print(f"  TG tracked: {len(tg_tracked)} (symbol, strategy) pair(s)")
 print()
 
 state        = load_portfolio_state() if TRADING_MODE != "live" else None
@@ -333,15 +371,17 @@ for symbol in UNIVERSE:   # use full UNIVERSE here — must manage all open posi
         })
 
         sig_for_alert = all_signals.get((symbol, strategy), {})
-        notify_signal_alert(
-            symbol        = symbol,
-            strategy      = strategy,
-            action        = "SELL",
-            price         = latest_price,
-            rsi           = sig_for_alert.get("rsi"),
-            gap_pct       = sig_for_alert.get("hma_gap_pct") if strategy == "hma" else None,
-            cloud_gap_pct = sig_for_alert.get("cloud_gap_pct") if strategy == "ichimoku" else None,
-        )
+        if (symbol, strategy) in tg_tracked:
+            notify_signal_alert(
+                symbol        = symbol,
+                strategy      = strategy,
+                action        = "SELL",
+                price         = latest_price,
+                rsi           = sig_for_alert.get("rsi"),
+                gap_pct       = sig_for_alert.get("hma_gap_pct") if strategy == "hma" else None,
+                cloud_gap_pct = sig_for_alert.get("cloud_gap_pct") if strategy == "ichimoku" else None,
+            )
+            _tg_untrack(tg_tracked, symbol, strategy)
 
         if TRADING_MODE == "live":
             from exchange import place_market_order
@@ -353,23 +393,24 @@ if not any_exit and count_open(UNIVERSE) == 0:
     print("  No open positions.")
 print()
 
-# ── Sell signal alerts — fire for ALL scanned coins with exit signal ──
-for symbol in SCANNED:
-    for strategy in STRATEGIES:
-        sig = all_signals.get((symbol, strategy))
-        if not sig or not sig.get("exit_signal"):
-            continue
-        if load_position(symbol, strategy) is not None:
-            continue
-        notify_signal_alert(
-            symbol        = symbol,
-            strategy      = strategy,
-            action        = "SELL",
-            price         = sig["close"],
-            rsi           = sig.get("rsi"),
-            gap_pct       = sig.get("hma_gap_pct")   if strategy == "hma"      else None,
-            cloud_gap_pct = sig.get("cloud_gap_pct") if strategy == "ichimoku" else None,
-        )
+# ── Sell signal alerts — only for coins we previously sent a BUY for ──
+# (coins without open positions but still tracked — e.g. signal flipped same run)
+for symbol, strategy in list(tg_tracked):
+    if load_position(symbol, strategy) is not None:
+        continue   # already handled in exit pass above
+    sig = all_signals.get((symbol, strategy))
+    if not sig or not sig.get("exit_signal"):
+        continue
+    notify_signal_alert(
+        symbol        = symbol,
+        strategy      = strategy,
+        action        = "SELL",
+        price         = sig["close"],
+        rsi           = sig.get("rsi"),
+        gap_pct       = sig.get("hma_gap_pct")   if strategy == "hma"      else None,
+        cloud_gap_pct = sig.get("cloud_gap_pct") if strategy == "ichimoku" else None,
+    )
+    _tg_untrack(tg_tracked, symbol, strategy)
 
 
 # =============================================================================
@@ -418,7 +459,7 @@ else:
         print(f"    {sym:<14} [{strat.upper():<8}]{dbl}  @ ₹{sig['close']:.4f}")
     print()
 
-    # ── Signal alerts — fire for ALL qualifying coins (no slot limit) ──
+    # ── Signal alerts — fire for ALL qualifying coins, register in tracker ──
     for sym, strat, sig in candidates:
         notify_signal_alert(
             symbol        = sym,
@@ -429,6 +470,7 @@ else:
             gap_pct       = sig.get("hma_gap_pct")    if strat == "hma"      else None,
             cloud_gap_pct = sig.get("cloud_gap_pct")  if strat == "ichimoku" else None,
         )
+        _tg_track(tg_tracked, sym, strat)   # register — SELL alerts now enabled for this coin
 
     # ── Paper trading execution — limited to MAX_OPEN_POSITIONS ──
     for sym, strat, sig in candidates:

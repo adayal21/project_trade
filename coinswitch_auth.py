@@ -27,10 +27,10 @@ COINSWITCH_BASE_URL = "https://coinswitch.co"
 
 def _get_credentials() -> tuple[str, str]:
     key    = os.environ.get("COINSWITCH_API_KEY", "")
-    secret = os.environ.get("COINSWITCH_SECRET_KEY", "")
+    secret = os.environ.get("COINSWITCH_API_SECRET", "")
     if not key or not secret:
         raise EnvironmentError(
-            "COINSWITCH_API_KEY and COINSWITCH_SECRET_KEY must be set as "
+            "COINSWITCH_API_KEY and COINSWITCH_API_SECRET must be set as "
             "environment variables before using the CoinSwitch API."
         )
     return key, secret
