@@ -26,7 +26,6 @@ from bot_utils import (
     compute_hma_signals,
     compute_hma_exit_1h,
     compute_ichimoku_signals,
-    notify_entry, notify_exit, notify_run_summary,
     notify_signal_alert,
 )
 from portfolio import initialize_portfolio, log_portfolio
@@ -290,8 +289,7 @@ for symbol in COINS:
             "Exit Time":   _now_utc.isoformat(),
         })
 
-        notify_exit(symbol, strategy, entry_price, latest_price,
-                    quantity, net_pnl, exit_reason)
+        # notify_exit removed — no paper trading noise on Telegram
 
         # Manual trading alert — SELL signal
         sig_for_alert = all_signals.get((symbol, strategy), {})
@@ -314,6 +312,25 @@ for symbol in COINS:
 if not any_exit and count_open() == 0:
     print("  No open positions.")
 print()
+
+# ── Sell signal alerts — fire for ALL coins with exit signal, no position needed ──
+for symbol in COINS:
+    for strategy in STRATEGIES:
+        sig = all_signals.get((symbol, strategy))
+        if not sig or not sig.get("exit_signal"):
+            continue
+        # Only alert if there's no open paper position (avoid double alerting)
+        if load_position(symbol, strategy) is not None:
+            continue
+        notify_signal_alert(
+            symbol        = symbol,
+            strategy      = strategy,
+            action        = "SELL",
+            price         = sig["close"],
+            rsi           = sig.get("rsi"),
+            gap_pct       = sig.get("hma_gap_pct")   if strategy == "hma"      else None,
+            cloud_gap_pct = sig.get("cloud_gap_pct") if strategy == "ichimoku" else None,
+        )
 
 
 # =============================================================================
@@ -361,6 +378,19 @@ else:
         print(f"    {sym:<14} [{strat.upper():<8}]{dbl}  @ {sig['close']:.4f}")
     print()
 
+    # ── Signal alerts — fire for ALL candidates, no slot limit ──
+    for sym, strat, sig in candidates:
+        notify_signal_alert(
+            symbol        = sym,
+            strategy      = strat,
+            action        = "BUY",
+            price         = sig["close"],
+            rsi           = sig.get("rsi"),
+            gap_pct       = sig.get("hma_gap_pct")    if strat == "hma"      else None,
+            cloud_gap_pct = sig.get("cloud_gap_pct")  if strat == "ichimoku" else None,
+        )
+
+    # ── Paper trading execution — limited to MAX_OPEN_POSITIONS ──
     for sym, strat, sig in candidates:
         if open_count >= MAX_OPEN_POSITIONS:
             print(f"  {sym} [{strat.upper()}]  BLOCKED — max positions")
@@ -370,30 +400,20 @@ else:
             print(f"  {sym} [{strat.upper()}]  BLOCKED — insufficient cash")
             continue
 
-        # ==================================================
-        # NEW 1H CONFIRMATION FILTER
-        # ==================================================
+        # 1H confirmation filter
         if strat == "hma":
-
             df1h = coins_data_1h.get(sym)
-
             if df1h is not None:
-
                 sig_1h = compute_hma_exit_1h(sym, df1h)
-
-                if sig_1h:
-
-                    if sig_1h["hma_fast"] <= sig_1h["hma_slow"]:
-
-                        print(
-                            f"  {sym} [HMA] BLOCKED "
-                            f"- 1H bearish "
-                            f"({sig_1h['hma_fast']:.4f} "
-                            f"< "
-                            f"{sig_1h['hma_slow']:.4f})"
-                        )
-
-                        continue
+                if sig_1h and sig_1h["hma_fast"] <= sig_1h["hma_slow"]:
+                    print(
+                        f"  {sym} [HMA] BLOCKED "
+                        f"- 1H bearish "
+                        f"({sig_1h['hma_fast']:.4f} "
+                        f"< "
+                        f"{sig_1h['hma_slow']:.4f})"
+                    )
+                    continue
 
         latest_price = sig["close"]
         quantity     = (allocation * POSITION_SIZE) / latest_price
@@ -430,24 +450,13 @@ else:
             "Bars_Held":   0,
         })
 
-        cash        -= allocation
-        open_count  += 1
+        cash         -= allocation
+        open_count   += 1
         total_trades += 1
         trades_run   += 1
         run_events.append(f"{sym}[{strat[:4].upper()}] ENTRY @ {latest_price:.4f}")
 
-        notify_entry(sym, strat, latest_price, quantity, allocation, sig)
-
-        # Manual trading alert — BUY signal
-        notify_signal_alert(
-            symbol   = sym,
-            strategy = strat,
-            action   = "BUY",
-            price    = latest_price,
-            rsi      = sig.get("rsi"),
-            gap_pct  = sig.get("hma_gap_pct") if strat == "hma" else None,
-            cloud_gap_pct = sig.get("cloud_gap_pct") if strat == "ichimoku" else None,
-        )
+        # notify_entry removed — no paper trading noise on Telegram
 
 print()
 
@@ -469,7 +478,28 @@ for s in COINS:
         unrealized += (cp - ep) * qty
 
 log_portfolio(cash, equity_final, open_count, realized_pnl, unrealized, total_trades, run_events)
-notify_run_summary(equity_final, cash, open_count, realized_pnl)
+
+# ── Heartbeat — every 6 hours, IST time only ──
+_heartbeat_file = f"{DATA_DIR}/last_heartbeat.txt"
+_now_ts = _now_utc.timestamp()
+_last_hb = 0.0
+try:
+    with open(_heartbeat_file) as _f:
+        _last_hb = float(_f.read().strip())
+except Exception:
+    pass
+
+if _now_ts - _last_hb >= 6 * 3600:
+    from datetime import timezone as _tz
+    import zoneinfo as _zi
+    _ist = _now_utc.astimezone(_zi.ZoneInfo("Asia/Kolkata"))
+    from bot_utils import _telegram
+    _telegram(f"🤖 Bot running — {_ist.strftime('%d %b %Y, %I:%M %p')} IST")
+    try:
+        with open(_heartbeat_file, "w") as _f:
+            _f.write(str(_now_ts))
+    except Exception:
+        pass
 
 ret_pct = (equity_final / INITIAL_CAPITAL - 1) * 100
 print("=" * 55)
