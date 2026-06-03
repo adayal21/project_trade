@@ -395,16 +395,9 @@ def _telegram(message: str) -> None:
 def notify_signal_alert(symbol: str, strategy: str, action: str,
                         price: float, rsi: float = None,
                         gap_pct: float = None, cloud_gap_pct: float = None) -> None:
-    """
-    Manual trading alert — fired on real buy/sell signals.
-    action: 'BUY' or 'SELL'
-    Sent independently of paper trading positions.
-    """
-    emoji   = "🟢" if action == "BUY" else "🔴"
-    strat   = strategy.upper()
-
+    emoji = "🟢" if action == "BUY" else "🔴"
     lines = [
-        f"{emoji} <b>{action} — {symbol}</b>  [{strat}]",
+        f"{emoji} <b>{action} — {symbol}</b>  [{strategy.upper()}]",
         f"Price : ₹{price:.4f}",
     ]
     if rsi is not None:
@@ -413,23 +406,7 @@ def notify_signal_alert(symbol: str, strategy: str, action: str,
         lines.append(f"Gap%  : {gap_pct:+.2f}%")
     if cloud_gap_pct is not None:
         lines.append(f"Cloud : {cloud_gap_pct:+.2f}%")
-
     _telegram("\n".join(lines))
-    if strategy == "ichimoku":
-        detail = (f"Cloud gap: {sig.get('cloud_gap_pct',0):+.2f}%\n"
-                  f"Kijun   : {sig.get('kijun',0):.4f} (stop)")
-    else:
-        detail = (f"RSI     : {sig.get('rsi',0):.1f}\n"
-                  f"HMA gap : {sig.get('hma_gap_pct',0):+.2f}%")
-
-    _telegram(
-        f"<b>Bot — ENTRY [{strategy.upper()}]</b>\n"
-        f"Coin       : {symbol}\n"
-        f"Price      : ${price:.4f}\n"
-        f"Qty        : {qty:.6f}\n"
-        f"Allocation : ${allocation:.2f}\n"
-        f"{detail}"
-    )
 
 
 def notify_exit(symbol: str, strategy: str, entry_price: float,
