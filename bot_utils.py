@@ -69,22 +69,23 @@ def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
         }
 
         success = False
-        for attempt in range(4):          # 4 attempts per page
-            wait = [0, 5, 15, 30][attempt]  # backoff: 0s, 5s, 15s, 30s
-            if wait:
-                time.sleep(wait)
+        for attempt in range(4):                          # up to 4 attempts per page
+            backoff = [0, 5, 15, 30][attempt]            # 0s → 5s → 15s → 30s
+            if backoff:
+                time.sleep(backoff)
+
             try:
                 resp = requests.get(CANDLES_URL, params=params, timeout=20)
             except requests.exceptions.RequestException as e:
-                print(f"  [{symbol}] fetch exception (attempt {attempt+1}): {e}")
+                print(f"  [{symbol}] fetch exception (attempt {attempt+1}/4): {e}")
                 continue
 
             if resp.status_code == 429:
-                print(f"  [{symbol}] rate limited — sleeping 30s")
+                print(f"  [{symbol}] rate limited (429) — sleeping 30s")
                 time.sleep(30)
                 continue
             if resp.status_code != 200:
-                print(f"  [{symbol}] HTTP {resp.status_code} (attempt {attempt+1}) — {resp.text[:80]}")
+                print(f"  [{symbol}] HTTP {resp.status_code} (attempt {attempt+1}/4): {resp.text[:120]}")
                 continue
 
             try:
@@ -99,13 +100,11 @@ def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
             break
 
         if not success:
-            print(f"  [{symbol}] gave up after 4 attempts — skipping coin")
+            print(f"  [{symbol}] gave up after 4 attempts — skipping")
             return pd.DataFrame()
 
         cur = end_ms + interval_ms
-        time.sleep(0.5)   # bumped from 0.3 → 0.5 between pages
-
-    # ... rest unchanged
+        time.sleep(0.5)                                   # 0.3 → 0.5s between pages
 
     if not all_rows:
         return pd.DataFrame()
