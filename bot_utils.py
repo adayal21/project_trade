@@ -1,14 +1,17 @@
 """
 bot_utils.py — Data fetching + signal computation for the Combined Bot.
+Data source: CoinSwitch PRO API (coinswitchx, INR pairs).
 
-Both HMA and Ichimoku run independently on ALL 12 coins.
+Both HMA and Ichimoku run independently on all coins.
 Each strategy can open its own separate position on the same coin.
 
 Functions:
-    fetch_candles(symbol)              → OHLCV DataFrame from CoinDCX (4H)
-    fetch_candles_1h(symbol)           → OHLCV DataFrame from CoinDCX (1H)
-    compute_hma_signals(symbol, df)    → HMA signal dict
-    compute_ichimoku_signals(symbol, df) → Ichimoku signal dict
+    fetch_candles(symbol)               → OHLCV DataFrame from CoinSwitch (4H)
+    fetch_candles_1h(symbol)            → OHLCV DataFrame from CoinSwitch (1H)
+    compute_hma_signals(symbol, df)     → HMA signal dict
+    compute_hma_exit_1h(symbol, df)     → lightweight HMA exit on 1H
+    compute_ichimoku_signals(symbol, df)→ Ichimoku signal dict
+    notify_signal_alert(...)            → Telegram BUY/SELL notification
 """
 
 from __future__ import annotations
@@ -20,10 +23,14 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 
-import utils   # YouTuber's HMA indicator library — do not modify
+import utils   # HMA indicator library — do not modify
 
 from config import (
-    CANDLES_URL, TIMEFRAME, CANDLES_LIMIT, INTERVAL_MS, WARMUP_BARS,
+    CS_EXCHANGE,
+    CANDLES_LIMIT,
+    TIMEFRAME_4H_MIN, TIMEFRAME_1H_MIN,
+    INTERVAL_MS_4H, INTERVAL_MS_1H,
+    WARMUP_BARS_4H, WARMUP_BARS_1H,
     HMA_FAST, HMA_SLOW, RSI_PERIOD, RSI_THRESHOLD, RSI_THRESHOLD_OVERRIDE,
     HMA_GAP_FILTER,
     LINREG_LENGTH, HMA_HALF_MODE, HMA_SQRT_MODE,
@@ -31,30 +38,35 @@ from config import (
     ICHI_TENKAN, ICHI_KIJUN, ICHI_SENKOU, ICHI_REQUIRE_CHIKOU,
     TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, VERBOSE,
 )
+from coinswitch_auth import signed_get
 
 _MIN_BARS_HMA  = 200
 _MIN_BARS_ICHI = ICHI_SENKOU + ICHI_KIJUN + 10
 
 
 # =============================================================================
-# CoinDCX pair helpers
+# CoinSwitch OHLCV fetcher
 # =============================================================================
 
-def _candle_pair(symbol: str) -> str:
-    base, quote = symbol.split("/")
-    return f"I-{base}_{quote}"
-
-def _order_symbol(symbol: str) -> str:
-    return symbol.replace("/", "")
-
-
-# =============================================================================
-# Generic OHLCV fetcher (shared logic)
-# =============================================================================
-
-def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
+def _fetch_ohlcv(symbol: str, interval_min: int, interval_ms: int,
                  warmup_bars: int) -> pd.DataFrame:
-    pair     = _candle_pair(symbol)
+    """
+    Fetch OHLCV candles from CoinSwitch PRO.
+
+    Parameters
+    ----------
+    symbol       : e.g. "BTC/INR"
+    interval_min : candle width in minutes (60 = 1H, 240 = 4H)
+    interval_ms  : candle width in milliseconds (used to compute time windows)
+    warmup_bars  : how many bars of history to fetch total
+
+    CoinSwitch candle endpoint:
+        GET /trade/api/v2/candles
+        params: exchange, symbol, interval (minutes), start_time (ms), end_time (ms)
+
+    Response: {"data": [{"o","h","l","c","volume","symbol","interval",
+                          "start_time","close_time"}, ...]}
+    """
     now_ms   = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = now_ms - (warmup_bars * interval_ms)
     all_rows = []
@@ -62,21 +74,24 @@ def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
 
     while cur < now_ms:
         end_ms = min(cur + CANDLES_LIMIT * interval_ms, now_ms)
+
         params = {
-            "pair": pair, "interval": interval,
-            "startTime": cur, "endTime": end_ms,
-            "limit": CANDLES_LIMIT,
+            "exchange":   CS_EXCHANGE,
+            "symbol":     symbol,
+            "interval":   str(interval_min),
+            "start_time": str(cur),
+            "end_time":   str(end_ms),
         }
 
         success = False
-        for attempt in range(4):                          # up to 4 attempts per page
-            backoff = [0, 5, 15, 30][attempt]            # 0s → 5s → 15s → 30s
+        for attempt in range(4):
+            backoff = [0, 5, 15, 30][attempt]
             if backoff:
                 time.sleep(backoff)
 
             try:
-                resp = requests.get(CANDLES_URL, params=params, timeout=20)
-            except requests.exceptions.RequestException as e:
+                resp = signed_get("/trade/api/v2/candles", params=params, timeout=20)
+            except Exception as e:
                 print(f"  [{symbol}] fetch exception (attempt {attempt+1}/4): {e}")
                 continue
 
@@ -89,11 +104,12 @@ def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
                 continue
 
             try:
-                candles = resp.json()
+                payload = resp.json()
             except Exception as e:
                 print(f"  [{symbol}] JSON parse error: {e}")
                 continue
 
+            candles = payload.get("data", [])
             if isinstance(candles, list) and candles:
                 all_rows.extend(candles)
             success = True
@@ -104,64 +120,101 @@ def _fetch_ohlcv(symbol: str, interval: str, interval_ms: int,
             return pd.DataFrame()
 
         cur = end_ms + interval_ms
-        time.sleep(0.5)                                   # 0.3 → 0.5s between pages
+        time.sleep(0.5)
 
     if not all_rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
-    ts_col = next(
-        (c for c in ["time","timestamp","open_time","ts"] if c in df.columns),
-        None
-    )
-    if ts_col is None:
+
+    # CoinSwitch response fields: o, h, l, c, volume, start_time, close_time
+    rename_map = {
+        "o":          "Open",
+        "h":          "High",
+        "l":          "Low",
+        "c":          "Close",
+        "volume":     "Volume",
+        "start_time": "timestamp",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    if "timestamp" not in df.columns:
+        print(f"  [{symbol}] unexpected response shape — missing start_time")
         return pd.DataFrame()
 
-    df = df.rename(columns={
-        ts_col: "timestamp", "open": "Open", "high": "High",
-        "low": "Low", "close": "Close", "volume": "Volume",
-    })
     df["timestamp"] = pd.to_datetime(
         pd.to_numeric(df["timestamp"], errors="coerce"),
-        unit="ms", utc=True
+        unit="ms", utc=True,
     )
     df = df.dropna(subset=["timestamp"])
     df = df.set_index("timestamp").sort_index()
     df = df[~df.index.duplicated(keep="last")]
-    for col in ["Open","High","Low","Close","Volume"]:
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["Open","High","Low","Close"])
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
     df = df[df["Close"] > 0]
+
+    # Sanity check — drop candles where close is less than 0.5% of open
     bad = (df["Close"] < df["Open"] * 0.005) & (df["Open"] > 0)
     if bad.sum() > 0:
         df = df[~bad]
 
-    return df[["Open","High","Low","Close","Volume"]]
+    return df[["Open", "High", "Low", "Close", "Volume"]]
 
 
 # =============================================================================
-# OHLCV fetching — public API
+# Public OHLCV fetchers
 # =============================================================================
 
 def fetch_candles(symbol: str) -> pd.DataFrame:
-    """Fetch WARMUP_BARS of 4H candles from CoinDCX — used for entries."""
-    return _fetch_ohlcv(symbol, TIMEFRAME, INTERVAL_MS, WARMUP_BARS)
+    """Fetch 4H candles from CoinSwitch — used for entry signals."""
+    return _fetch_ohlcv(symbol, TIMEFRAME_4H_MIN, INTERVAL_MS_4H, WARMUP_BARS_4H)
 
 
 def fetch_candles_1h(symbol: str) -> pd.DataFrame:
-    """Fetch 500 bars of 1H candles from CoinDCX — used for 1H exit detection.
-    500 bars = ~21 days — enough for HMA(64) warmup.
-    """
-    return _fetch_ohlcv(symbol, "1h", 3_600_000, 500)
+    """Fetch 1H candles from CoinSwitch — used for 1H exit detection."""
+    return _fetch_ohlcv(symbol, TIMEFRAME_1H_MIN, INTERVAL_MS_1H, WARMUP_BARS_1H)
 
+
+# =============================================================================
+# Dynamic coin universe helpers
+# =============================================================================
+
+def fetch_all_inr_pairs() -> list[str]:
+    """
+    Fetch all active INR trading pairs from CoinSwitch PRO.
+    Returns a list like ["BTC/INR", "ETH/INR", ...].
+    Falls back to COINS from config on error.
+    """
+    from config import COINS
+    try:
+        resp = signed_get("/trade/api/v2/coins", params={"exchange": CS_EXCHANGE}, timeout=15)
+        if resp.status_code != 200:
+            print(f"  [fetch_all_inr_pairs] HTTP {resp.status_code} — using config COINS")
+            return COINS
+        data = resp.json().get("data", {})
+        symbols = data.get(CS_EXCHANGE, [])
+        inr_pairs = sorted([s for s in symbols if s.endswith("/INR")])
+        if not inr_pairs:
+            return COINS
+        return inr_pairs
+    except Exception as e:
+        print(f"  [fetch_all_inr_pairs] error: {e} — using config COINS")
+        return COINS
+
+
+# =============================================================================
+# Lightweight 1H HMA exit (no utils dependency)
+# =============================================================================
 
 def compute_hma_exit_1h(symbol: str, df: pd.DataFrame) -> dict | None:
     """
     Lightweight HMA exit signal for 1H candles.
-    Does NOT use YouTuber's library — computes HMA directly.
+    Does NOT use utils library — computes HMA directly with pandas_ta.
     Only checks exit condition: HMA fast crosses below HMA slow.
-    Used for 1H exit detection on BNB, ADA, AVAX, LINK, ZEC, JASMY, POL.
     """
     if len(df) < HMA_SLOW + 10:
         return None
@@ -172,12 +225,9 @@ def compute_hma_exit_1h(symbol: str, df: pd.DataFrame) -> dict | None:
         def _hma(s, p):
             half  = max(int(p / 2), 1)
             sqrtp = max(int(np.sqrt(p)), 1)
-
             wma_half = ta.wma(s, length=half)
             wma_full = ta.wma(s, length=p)
-
             raw = 2 * wma_half - wma_full
-
             return ta.wma(raw, length=sqrtp)
 
         hma_fast = _hma(close, HMA_FAST)
@@ -188,16 +238,14 @@ def compute_hma_exit_1h(symbol: str, df: pd.DataFrame) -> dict | None:
         prev_fast   = float(hma_fast.iloc[-2])
         prev_slow   = float(hma_slow.iloc[-2])
 
-        # Exit: HMA fast crosses below HMA slow
-        cross_down  = (latest_fast < latest_slow) and (prev_fast >= prev_slow)
-        # Also exit if fast has been below slow for the last bar (sustained cross)
-        below       = latest_fast < latest_slow
+        cross_down = (latest_fast < latest_slow) and (prev_fast >= prev_slow)
+        below      = latest_fast < latest_slow
 
         hma_gap = (latest_fast - latest_slow) / latest_slow * 100 if latest_slow != 0 else 0.0
 
         return {
             "strategy":     "hma",
-            "entry_signal": False,   # never enter from 1H function
+            "entry_signal": False,
             "exit_signal":  cross_down or below,
             "close":        float(df["Close"].iloc[-1]),
             "hma_fast":     latest_fast,
@@ -213,23 +261,18 @@ def compute_hma_exit_1h(symbol: str, df: pd.DataFrame) -> dict | None:
 
 
 # =============================================================================
-# HMA signal computation
+# HMA signal computation (4H entry + exit)
 # =============================================================================
 
 def compute_hma_signals(symbol: str, df: pd.DataFrame,
                         min_bars: int = _MIN_BARS_HMA) -> dict | None:
     """
     HMA(16/64) + RSI(14) + LinReg(50) strategy.
-    Uses utils.prepare_dataset() — the YouTuber's validated indicator code.
-    RSI threshold is per-coin: BTC/ETH use 50, all others use 52.
-    Gap filter: DOGE/ETH/XRP/BNB allow mid-trend entry when gap ≤ 2%.
-    Works on both 4H candles (entry) and 1H candles (exit detection).
-    min_bars: lower for 1H exit use (100 bars sufficient for exit signal).
+    Uses utils.prepare_dataset() — the validated indicator library.
     """
     if len(df) < min_bars:
         return None
 
-    # Per-coin RSI threshold — BTC and ETH use 50 (backtest validated)
     rsi_thresh = RSI_THRESHOLD_OVERRIDE.get(symbol, RSI_THRESHOLD)
 
     try:
@@ -256,7 +299,6 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame,
         if float(row["hma_slow"]) != 0 else 0.0
     )
 
-    # Per-coin gap filter for mid-trend entry
     gap_filter = HMA_GAP_FILTER.get(symbol)
     if gap_filter is not None:
         hma_gap_frac    = hma_gap / 100
@@ -269,7 +311,6 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame,
     else:
         entry_signal = bool(row["entry_long"] == 1)
 
-    # print(f"  [{symbol}] bar_time={row.name} close={float(row['Close']):.6f} fast={float(row['hma_fast']):.6f} slow={float(row['hma_slow']):.6f}")
     return {
         "strategy":     "hma",
         "entry_signal": entry_signal,
@@ -286,14 +327,14 @@ def compute_hma_signals(symbol: str, df: pd.DataFrame,
 
 
 # =============================================================================
-# Ichimoku signal computation
+# Ichimoku signal computation (4H)
 # =============================================================================
 
 def compute_ichimoku_signals(symbol: str, df: pd.DataFrame) -> dict | None:
     """
     Ichimoku entry conditions (per-coin chikou override):
-      ETH/BNB : TK cross + chikou + above cloud (strict)
-      Others  : TK cross + above cloud (no chikou — backtest validated)
+      Default : TK cross + above cloud (no chikou)
+      Override: TK cross + chikou + above cloud
 
     Exit:
       - Tenkan crosses below Kijun
@@ -319,8 +360,8 @@ def compute_ichimoku_signals(symbol: str, df: pd.DataFrame) -> dict | None:
         ) / 2
         d["span_a"]       = span_a_raw.shift(ICHI_KIJUN)
         d["span_b"]       = span_b_raw.shift(ICHI_KIJUN)
-        d["cloud_top"]    = d[["span_a","span_b"]].max(axis=1)
-        d["cloud_bottom"] = d[["span_a","span_b"]].min(axis=1)
+        d["cloud_top"]    = d[["span_a", "span_b"]].max(axis=1)
+        d["cloud_bottom"] = d[["span_a", "span_b"]].min(axis=1)
         d["chikou_ref"]   = d["Close"].shift(ICHI_KIJUN)
         d = d.dropna()
 
@@ -418,19 +459,19 @@ def notify_exit(symbol: str, strategy: str, entry_price: float,
         f"<b>Bot — EXIT [{strategy.upper()}]</b>\n"
         f"Coin   : {symbol}\n"
         f"Reason : {reason}\n"
-        f"Entry  : ${entry_price:.4f}\n"
-        f"Exit   : ${exit_price:.4f}\n"
+        f"Entry  : ₹{entry_price:.4f}\n"
+        f"Exit   : ₹{exit_price:.4f}\n"
         f"Move   : {pct:+.2f}%\n"
-        f"PnL    : {sign}${pnl:.2f}"
+        f"PnL    : {sign}₹{pnl:.2f}"
     )
 
 
 def notify_run_summary(equity: float, cash: float,
-                        open_pos: int, realized_pnl: float) -> None:
+                       open_pos: int, realized_pnl: float) -> None:
     _telegram(
         f"<b>Bot — Run Summary</b>\n"
-        f"Equity   : ${equity:.2f}\n"
-        f"Cash     : ${cash:.2f}\n"
+        f"Equity   : ₹{equity:.2f}\n"
+        f"Cash     : ₹{cash:.2f}\n"
         f"Open     : {open_pos}\n"
-        f"Realized : ${realized_pnl:+.2f}"
+        f"Realized : ₹{realized_pnl:+.2f}"
     )

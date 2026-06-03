@@ -1,28 +1,30 @@
 """
-main.py — HMA + Ichimoku Combined Crypto Bot
-=============================================
+main.py — HMA + Ichimoku Combined Crypto Bot (CoinSwitch PRO)
+=============================================================
 Entry  : 4H candle close only (0,4,8,12,16,20 UTC)
 Exit   : 1H candles, checked every hourly cron run — ALL coins
-         Uses compute_hma_exit_1h() (EWM-based HMA, no linreg dependency)
-         which avoids the None return from utils.prepare_dataset on short 1H history.
+
+Coin universe: fetched live from CoinSwitch PRO at startup.
+               All active INR pairs are scanned. No hardcoded list.
 
 Cron:
     5 * * * * cd ~/Projects/project_trade && echo "========================================" >> logs/live.log && TZ=Asia/Kolkata date >> logs/live.log && /home/g12amandayal12/Projects/venv/bin/python main.py >> logs/live.log 2>&1
 """
 
 import os
-import sys
+import glob
 import pandas as pd
 from datetime import datetime, timezone
 
 from config import (
-    TRADING_MODE, INITIAL_CAPITAL, COINS, STRATEGIES, DATA_DIR,
+    TRADING_MODE, INITIAL_CAPITAL, STRATEGIES, DATA_DIR,
     ALLOCATION_PCT, MAX_OPEN_POSITIONS, POSITION_SIZE,
     COMMISSION, STOP_LOSS_PCT, VERBOSE,
 )
 from bot_utils import (
     fetch_candles,
     fetch_candles_1h,
+    fetch_all_inr_pairs,
     compute_hma_signals,
     compute_hma_exit_1h,
     compute_ichimoku_signals,
@@ -76,8 +78,26 @@ def log_trade(symbol, strategy, trade):
         df = pd.concat([pd.read_csv(f), df], ignore_index=True)
     df.to_csv(f, index=False)
 
-def count_open():
-    return sum(1 for s in COINS for st in STRATEGIES
+def get_coins_with_open_positions() -> list[str]:
+    """
+    Scan the data directory for any existing position files and return the
+    unique coin symbols. This ensures we always manage positions that were
+    opened under a previous coin universe, even if that coin is no longer
+    in the live scan list.
+    """
+    coins = set()
+    for path in glob.glob(f"{DATA_DIR}/*_position.csv"):
+        fname = os.path.basename(path)                 # e.g. BTC_INR_hma_position.csv
+        # strip the trailing _hma_position.csv or _ichi_position.csv
+        for suffix in ["_hma_position.csv", "_ichi_position.csv"]:
+            if fname.endswith(suffix):
+                safe_sym = fname[: -len(suffix)]       # e.g. BTC_INR
+                coins.add(safe_sym.replace("_", "/", 1))  # BTC/INR
+                break
+    return list(coins)
+
+def count_open(universe: list[str]) -> int:
+    return sum(1 for s in universe for st in STRATEGIES
                if load_position(s, st) is not None)
 
 def load_portfolio_state():
@@ -93,9 +113,9 @@ def load_portfolio_state():
             }
     return {"cash": INITIAL_CAPITAL, "realized_pnl": 0.0, "total_trades": 0}
 
-def current_equity(cash, coins_data):
+def current_equity(cash, coins_data, universe: list[str]) -> float:
     val = 0.0
-    for s in COINS:
+    for s in universe:
         for st in STRATEGIES:
             pos = load_position(s, st)
             if pos is None: continue
@@ -117,10 +137,27 @@ print(f"  CRYPTO BOT | {TRADING_MODE.upper()} | {_now_utc.strftime('%Y-%m-%d %H:
 print(f"  {'4H CLOSE — entries + exits' if _is_4h_close else 'Hourly — exits only'}")
 print("=" * 55)
 
+# ---------------------------------------------------------------------------
+# Fetch live coin universe from CoinSwitch
+# ---------------------------------------------------------------------------
+print("  Fetching live INR pair universe from CoinSwitch...")
+UNIVERSE = fetch_all_inr_pairs()
+
+# Also include any coins with open positions that may not be in live universe
+# (handles delisted coins — we still need to exit them)
+position_coins = get_coins_with_open_positions()
+extra = [c for c in position_coins if c not in UNIVERSE]
+if extra:
+    print(f"  Adding {len(extra)} coin(s) with open positions not in live universe: {extra}")
+    UNIVERSE = extra + UNIVERSE   # prepend so they're checked first in exit pass
+
+print(f"  Universe: {len(UNIVERSE)} INR pairs")
+print()
+
 state        = load_portfolio_state() if TRADING_MODE != "live" else None
 if TRADING_MODE == "live":
-    from exchange import get_live_usdt_balance
-    cash         = get_live_usdt_balance()
+    from exchange import get_live_inr_balance
+    cash         = get_live_inr_balance()
     state        = load_portfolio_state()
     realized_pnl = state["realized_pnl"]
     total_trades = state["total_trades"]
@@ -132,7 +169,7 @@ else:
 run_events = []
 trades_run = 0
 
-open_now = count_open()
+open_now = count_open(UNIVERSE)
 print(f"  Cash: ₹{cash:,.2f}  |  Open: {open_now}/{MAX_OPEN_POSITIONS}  |  Trades: {total_trades}  |  PnL: ₹{realized_pnl:+,.2f}")
 print()
 
@@ -145,17 +182,20 @@ coins_data    = {}   # 4H candles — entries + Ichimoku signals
 coins_data_1h = {}   # 1H candles — HMA exit for ALL coins
 
 fetch_errors = []
-for symbol in COINS:
+total = len(UNIVERSE)
+for i, symbol in enumerate(UNIVERSE, 1):
+    print(f"  [{i}/{total}] {symbol} ...", end=" ", flush=True)
+
     # --- 4H candles ---
     df4h = fetch_candles(symbol)
     if df4h.empty or len(df4h) < 100:
-        # print(f"  [{symbol}] 4H fetch failed or insufficient bars ({len(df4h)}), skipping")
+        print(f"4H insufficient ({len(df4h)} bars) — skip")
         fetch_errors.append(symbol)
         continue
 
     age_4h = (datetime.now(timezone.utc) - df4h.index[-1]).total_seconds() / 3600
     if age_4h > 8:
-        print(f"  [{symbol}] STALE 4H DATA — {age_4h:.1f}h old, skipping")
+        print(f"STALE 4H ({age_4h:.1f}h old) — skip")
         fetch_errors.append(symbol)
         continue
 
@@ -163,19 +203,25 @@ for symbol in COINS:
 
     # --- 1H candles ---
     df1h = fetch_candles_1h(symbol)
-    if df1h.empty or len(df1h) < 80:
-        # print(f"  [{symbol}] 1H fetch failed or insufficient bars ({len(df1h)}), skipping 1H")
-        continue
+    ok_1h = ""
+    if not df1h.empty and len(df1h) >= 80:
+        age_1h = (datetime.now(timezone.utc) - df1h.index[-1]).total_seconds() / 3600
+        if age_1h <= 2:
+            coins_data_1h[symbol] = df1h
+            ok_1h = "✓1H"
 
-    age_1h = (datetime.now(timezone.utc) - df1h.index[-1]).total_seconds() / 3600
-    if age_1h > 2:
-        # print(f"  [{symbol}] STALE 1H DATA — {age_1h:.1f}h old, skipping 1H")
-        continue
+    print(f"✓4H {ok_1h}")
 
-    coins_data_1h[symbol] = df1h
-
+print()
 if fetch_errors:
-    print(f"  FETCH ERRORS: {', '.join(fetch_errors)}")
+    print(f"  FETCH ERRORS ({len(fetch_errors)}): {', '.join(fetch_errors)}")
+    print()
+
+# Shrink UNIVERSE to only coins we have candle data for
+# (keeps all signal + exit loops clean — no dead iterations)
+SCANNED = list(coins_data.keys())
+print(f"  Scanned: {len(SCANNED)} coins with valid 4H data")
+print()
 
 
 # =============================================================================
@@ -220,7 +266,7 @@ print("  Exit pass  [1H HMA for all HMA | Ichimoku signals]")
 print("=" * 55)
 
 any_exit = False
-for symbol in COINS:
+for symbol in UNIVERSE:   # use full UNIVERSE here — must manage all open positions
     for strategy in STRATEGIES:
         pos = load_position(symbol, strategy)
         if pos is None:
@@ -237,17 +283,14 @@ for symbol in COINS:
         exit_reason = None
 
         if strategy == "hma":
-            # Stop loss
             if move_pct <= -STOP_LOSS_PCT:
                 exit_reason = "STOP_LOSS"
             else:
-                # 1H HMA exit — ALL coins use this path now
                 if symbol in coins_data_1h:
                     sig_1h = compute_hma_exit_1h(symbol, coins_data_1h[symbol])
                     if sig_1h and sig_1h["exit_signal"]:
                         exit_reason = "HMA_1H_CROSS"
                 else:
-                    # Fallback to 4H signal only if 1H fetch failed
                     if sig_4h and sig_4h["exit_signal"]:
                         exit_reason = "HMA_4H_FALLBACK"
 
@@ -289,17 +332,14 @@ for symbol in COINS:
             "Exit Time":   _now_utc.isoformat(),
         })
 
-        # notify_exit removed — no paper trading noise on Telegram
-
-        # Manual trading alert — SELL signal
         sig_for_alert = all_signals.get((symbol, strategy), {})
         notify_signal_alert(
-            symbol   = symbol,
-            strategy = strategy,
-            action   = "SELL",
-            price    = latest_price,
-            rsi      = sig_for_alert.get("rsi"),
-            gap_pct  = sig_for_alert.get("hma_gap_pct") if strategy == "hma" else None,
+            symbol        = symbol,
+            strategy      = strategy,
+            action        = "SELL",
+            price         = latest_price,
+            rsi           = sig_for_alert.get("rsi"),
+            gap_pct       = sig_for_alert.get("hma_gap_pct") if strategy == "hma" else None,
             cloud_gap_pct = sig_for_alert.get("cloud_gap_pct") if strategy == "ichimoku" else None,
         )
 
@@ -309,17 +349,16 @@ for symbol in COINS:
 
         clear_position(symbol, strategy)
 
-if not any_exit and count_open() == 0:
+if not any_exit and count_open(UNIVERSE) == 0:
     print("  No open positions.")
 print()
 
-# ── Sell signal alerts — fire for ALL coins with exit signal, no position needed ──
-for symbol in COINS:
+# ── Sell signal alerts — fire for ALL scanned coins with exit signal ──
+for symbol in SCANNED:
     for strategy in STRATEGIES:
         sig = all_signals.get((symbol, strategy))
         if not sig or not sig.get("exit_signal"):
             continue
-        # Only alert if there's no open paper position (avoid double alerting)
         if load_position(symbol, strategy) is not None:
             continue
         notify_signal_alert(
@@ -341,8 +380,8 @@ print("=" * 55)
 print("  Entry pass")
 print("=" * 55)
 
-equity_now = current_equity(cash, coins_data)
-open_count = count_open()
+equity_now = current_equity(cash, coins_data, UNIVERSE)
+open_count = count_open(UNIVERSE)
 
 if not _is_4h_close:
     print("  Skipped — not a 4H close.")
@@ -350,35 +389,36 @@ if not _is_4h_close:
 else:
     raw_candidates = [
         (sym, strat, sig)
-        for sym in COINS
+        for sym in SCANNED          # only coins we successfully fetched
         for strat in STRATEGIES
         if (sig := all_signals.get((sym, strat))) and
            sig["entry_signal"] and
            load_position(sym, strat) is None
     ]
 
-# Double-confirmed priority
+# Double-confirmed priority — coins where BOTH strategies fire
 entry_coins = {}
 for sym, strat, sig in raw_candidates:
     entry_coins.setdefault(sym, []).append(strat)
 double_confirmed = {sym for sym, strats in entry_coins.items() if len(strats) >= 2}
 
+# Sort: double-confirmed first, then alphabetical within each tier
 candidates = sorted(raw_candidates, key=lambda c: (
     0 if c[0] in double_confirmed else 1,
-    COINS.index(c[0]) if c[0] in COINS else 99,
+    c[0],                             # alphabetical — fair ordering across 100+ coins
     0 if c[1] == "hma" else 1,
 ))
 
 if not candidates:
     print("  No entry signals." if _is_4h_close else "")
 else:
-    print(f"  {len(candidates)} signal(s):")
+    print(f"  {len(candidates)} signal(s) from {len(SCANNED)} coins scanned:")
     for sym, strat, sig in candidates:
         dbl = " ★DOUBLE" if sym in double_confirmed else ""
-        print(f"    {sym:<14} [{strat.upper():<8}]{dbl}  @ {sig['close']:.4f}")
+        print(f"    {sym:<14} [{strat.upper():<8}]{dbl}  @ ₹{sig['close']:.4f}")
     print()
 
-    # ── Signal alerts — fire for ALL candidates, no slot limit ──
+    # ── Signal alerts — fire for ALL qualifying coins (no slot limit) ──
     for sym, strat, sig in candidates:
         notify_signal_alert(
             symbol        = sym,
@@ -456,8 +496,6 @@ else:
         trades_run   += 1
         run_events.append(f"{sym}[{strat[:4].upper()}] ENTRY @ {latest_price:.4f}")
 
-        # notify_entry removed — no paper trading noise on Telegram
-
 print()
 
 
@@ -465,10 +503,10 @@ print()
 # Step 5 — Portfolio snapshot
 # =============================================================================
 
-equity_final = current_equity(cash, coins_data)
-open_count   = count_open()
-unrealized = 0.0
-for s in COINS:
+equity_final = current_equity(cash, coins_data, UNIVERSE)
+open_count   = count_open(UNIVERSE)
+unrealized   = 0.0
+for s in UNIVERSE:
     for st in STRATEGIES:
         pos = load_position(s, st)
         if pos is None: continue
@@ -479,9 +517,9 @@ for s in COINS:
 
 log_portfolio(cash, equity_final, open_count, realized_pnl, unrealized, total_trades, run_events)
 
-# ── Heartbeat — every 6 hours, IST time only ──
+# ── Heartbeat — every 6 hours ──
 _heartbeat_file = f"{DATA_DIR}/last_heartbeat.txt"
-_now_ts = _now_utc.timestamp()
+_now_ts  = _now_utc.timestamp()
 _last_hb = 0.0
 try:
     with open(_heartbeat_file) as _f:
@@ -490,11 +528,13 @@ except Exception:
     pass
 
 if _now_ts - _last_hb >= 6 * 3600:
-    from datetime import timezone as _tz
     import zoneinfo as _zi
     _ist = _now_utc.astimezone(_zi.ZoneInfo("Asia/Kolkata"))
     from bot_utils import _telegram
-    _telegram(f"🤖 Bot running — {_ist.strftime('%d %b %Y, %I:%M %p')} IST")
+    _telegram(
+        f"🤖 Bot running — {_ist.strftime('%d %b %Y, %I:%M %p')} IST\n"
+        f"Universe: {len(SCANNED)} coins scanned  |  Open: {open_count}/{MAX_OPEN_POSITIONS}"
+    )
     try:
         with open(_heartbeat_file, "w") as _f:
             _f.write(str(_now_ts))
@@ -510,7 +550,7 @@ print(f"  Return: {ret_pct:+.2f}%  |  PnL: ₹{realized_pnl:+,.2f}  |  Open: {op
 if open_count > 0:
     print()
     print("  Open positions:")
-    for s in COINS:
+    for s in UNIVERSE:
         for st in STRATEGIES:
             pos = load_position(s, st)
             if pos is None: continue
@@ -523,7 +563,7 @@ if open_count > 0:
             sig  = all_signals.get((s, st))
             gap_str = ""
             if sig and st == "hma":
-                gap = sig.get("hma_gap_pct", 0)
+                gap   = sig.get("hma_gap_pct", 0)
                 label = "ext" if gap > 5 else "ok" if gap > 1 else "weak" if gap > 0 else "EXIT"
                 gap_str = f"  gap={gap:+.2f}%({label})"
             elif sig and st == "ichimoku":
@@ -533,4 +573,5 @@ if open_count > 0:
 
 print()
 print(f"  Done. [{'4H close' if _is_4h_close else 'hourly exit'}]  Next: :05 past next hour")
+print(f"  Scanned {len(SCANNED)} / {len(UNIVERSE)} INR pairs")
 print("=" * 55)

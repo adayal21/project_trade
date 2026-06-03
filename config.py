@@ -1,10 +1,11 @@
 # =============================================================================
-# config.py — HMA + Ichimoku Combined Crypto Bot
+# config.py — HMA + Ichimoku Combined Crypto Bot (CoinSwitch PRO)
 # =============================================================================
-# Two strategies running on 12 coins simultaneously:
+# Two strategies running on all INR pairs simultaneously:
 #   HMA       : HMA(16/64) + RSI(14) + LinReg(50) on 4H
 #   Ichimoku  : TK cross + Chikou + Above cloud on 4H
 #
+# Data source : CoinSwitch PRO API (coinswitchx exchange)
 # Cron: 5 * * * *  (every hour — exits checked hourly, entries at 4H closes)
 # =============================================================================
 
@@ -35,7 +36,7 @@ else:
 DATA_DIR = "data"
 
 # ---------------------------------------------------------------------------
-# Coin universe
+# Coin universe — all backtested INR pairs on CoinSwitch
 # ---------------------------------------------------------------------------
 COINS = [
     # ── Core — backtested, proven positive returns ──
@@ -50,7 +51,7 @@ COINS = [
     "INJ/INR",     # Combined  +2.7% | HMA  -1.8% | ICHI  +4.5%
     "TRX/INR",     # Combined  +2.5% | HMA  +0.3% | ICHI  +2.2%
 
-    # ── Tier 1 additions — established coins, fresh data confirmed ──
+    # ── Tier 1 additions — established coins, confirmed on CoinSwitch ──
     "DOT/INR",     # Polkadot — strong ecosystem, good HMA trends
     "ATOM/INR",    # Cosmos — consistent trending behaviour
     "NEAR/INR",    # NEAR Protocol — strong momentum coin
@@ -76,67 +77,20 @@ STRATEGIES = ["hma", "ichimoku"]
 HMA_FAST         = 16
 HMA_SLOW         = 64
 RSI_PERIOD       = 14
-RSI_THRESHOLD    = 52       # default RSI threshold for all coins
+RSI_THRESHOLD    = 52
 LINREG_LENGTH    = 50
 HMA_HALF_MODE    = "round"
 HMA_SQRT_MODE    = "floor"
 USE_SMA          = False
 USE_DAILY_LINREG = False
 
-# Per-coin RSI overrides — based on backtest analysis
-# BTC and ETH perform better at RSI 50 (+27.9% and +35.6% improvement)
 RSI_THRESHOLD_OVERRIDE = {}
 
-# Exit frequency — ALL coins use 1H exit (backtest validated: best Sharpe 0.98,
-# lowest drawdown -24.7%, best profit factor 1.68 vs 4H+4H combo)
-# Entry remains 4H only. Exit checked every hourly cron run via 1H candles.
-HMA_EXIT_FREQUENCY = {c: "1h" for c in [
-    "DOGE/INR", "ADA/INR", "XRP/INR", "ZEC/INR", "SOL/INR",
-    "SHIB/INR", "BTC/INR", "LINK/INR", "INJ/INR", "TRX/INR",
-    "DOT/INR", "ATOM/INR", "NEAR/INR", "ARB/INR", "UNI/INR",
-    "RENDER/INR", "TAO/INR", "SUI/INR", "LDO/INR",
-    "APT/INR", "FIL/INR", "JUP/INR", "VIRTUAL/INR",
-]}
+HMA_EXIT_FREQUENCY = {c: "1h" for c in COINS}
 
-# Per-coin HMA gap filter for mid-trend entry — based on backtest analysis
-# None = crossover only (strict)
-# 0.02 = allow mid-trend entry when gap ≤ 2% (not too extended)
-# Coins that benefit from mid-trend entry: DOGE +140%, ETH +14%, XRP +27%, BNB +34%
-# Coins that perform better with strict crossover: BTC, ZEC, ADA, SOL, AVAX, LINK, JASMY, POL
 HMA_GAP_FILTER = {}
 
-# Per-coin Ichimoku Chikou condition override — based on backtest analysis
-# True  = require chikou (current strict behavior)
-# False = skip chikou check (enter on TK cross + cloud only)
-# Removing chikou improves avg return from +22% to +48.4% on most coins
-# ETH and BNB perform better WITH chikou — keep strict for those
-ICHI_REQUIRE_CHIKOU = {
-    # Backtested coins — validated settings
-    "DOGE/INR":    False,
-    "ADA/INR":     False,
-    "XRP/INR":     False,
-    "ZEC/INR":     False,
-    "SOL/INR":     False,
-    "SHIB/INR":    False,
-    "BTC/INR":     False,
-    "LINK/INR":    False,
-    "INJ/INR":     False,
-    "TRX/INR":     False,
-    # New additions — default False (no backtest yet)
-    "DOT/INR":     False,
-    "ATOM/INR":    False,
-    "NEAR/INR":    False,
-    "ARB/INR":     False,
-    "UNI/INR":     False,
-    "RENDER/INR":  False,
-    "TAO/INR":     False,
-    "SUI/INR":     False,
-    "LDO/INR":     False,
-    "APT/INR":     False,
-    "FIL/INR":     False,
-    "JUP/INR":     False,
-    "VIRTUAL/INR": False,
-}
+ICHI_REQUIRE_CHIKOU = {c: False for c in COINS}
 
 # ---------------------------------------------------------------------------
 # Ichimoku strategy parameters — DO NOT CHANGE
@@ -148,14 +102,14 @@ ICHI_SENKOU  = 52
 # ---------------------------------------------------------------------------
 # Position sizing
 # ---------------------------------------------------------------------------
-ALLOCATION_PCT     = 0.20   # 20% per trade — max 4 active = 80% deployed
-MAX_OPEN_POSITIONS = 4      # max simultaneous positions
-POSITION_SIZE      = 0.999  # tiny rounding buffer
+ALLOCATION_PCT     = 0.20
+MAX_OPEN_POSITIONS = 4
+POSITION_SIZE      = 0.999
 
 # ---------------------------------------------------------------------------
 # Commission
 # ---------------------------------------------------------------------------
-COMMISSION = 0.002   # 0.2% per side — CoinDCX actual taker fee
+COMMISSION = 0.002   # 0.2% per side — CoinSwitch taker fee
 
 # ---------------------------------------------------------------------------
 # Stop loss (HMA coins only — Ichimoku uses Kijun as dynamic stop)
@@ -163,13 +117,26 @@ COMMISSION = 0.002   # 0.2% per side — CoinDCX actual taker fee
 STOP_LOSS_PCT = 0.15
 
 # ---------------------------------------------------------------------------
-# Data fetching
+# CoinSwitch PRO API — data fetching
 # ---------------------------------------------------------------------------
-CANDLES_URL   = "https://public.coindcx.com/market_data/candles"
-TIMEFRAME     = "4h"
-CANDLES_LIMIT = 500
-INTERVAL_MS   = 14_400_000
-WARMUP_BARS   = 400
+# Exchange identifier for INR spot pairs on CoinSwitch PRO
+CS_EXCHANGE   = "coinswitchx"
+CS_BASE_URL   = "https://coinswitch.co"
+
+# Candle intervals in minutes — CoinSwitch uses integer minutes
+TIMEFRAME_4H_MIN  = 240    # 4 hours
+TIMEFRAME_1H_MIN  = 60     # 1 hour
+
+# How many bars to fetch for warmup
+WARMUP_BARS_4H = 400       # 400 × 4H = ~66 days
+WARMUP_BARS_1H = 500       # 500 × 1H = ~21 days
+
+# Interval durations in milliseconds (used to compute start_time windows)
+INTERVAL_MS_4H = 14_400_000   # 4h in ms
+INTERVAL_MS_1H =  3_600_000   # 1h in ms
+
+# Max candles per API request (API doesn't document a hard limit; 500 is safe)
+CANDLES_LIMIT  = 500
 
 # ---------------------------------------------------------------------------
 # Telegram notifications (optional)
